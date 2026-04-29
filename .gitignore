@@ -1,0 +1,21 @@
+#
+# Minimal, runnable repo whitelist
+# --------------------------------
+# Goal: keep only code required to run:
+#   - run_single_bundle.py
+#   - orchestrate.py
+#
+# Everything else (CSV/XLSX datasets, notebooks, logs, reports, etc.)
+# will be ignored by default.
+#
+
+*
+
+!.gitignore
+!requirements.txt
+!run_single_bundle.py
+!orchestrate.py
+!fill_invalid_generic.py
+!enrichers/
+!enrichers/**/*.py
+

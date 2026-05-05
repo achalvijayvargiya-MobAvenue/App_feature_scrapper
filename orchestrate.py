@@ -9,7 +9,8 @@ files:
                          Pass this file to llm_fallback.py to recover those rows.
 
 Assumes the input CSV was already scraped (e.g. by a teammate).
-This script does NOT scrape and does NOT call the LLM.
+If required fields are missing, this script can scrape Google Play bundle-wise
+to fill those fields before validation. This script does NOT call the LLM.
 
 Target schema columns (test.txt):
     bundle_id, description, summary, genreid, content_rating, score,
@@ -44,8 +45,11 @@ import logging
 import sys
 from pathlib import Path
 from functools import reduce
+from datetime import datetime, timezone
 
 import pandas as pd
+from google_play_scraper import app as gps_app
+from google_play_scraper.exceptions import NotFoundError
 
 # ── Enrichers ────────────────────────────────────────────────────────────────
 from enrichers import (
@@ -71,7 +75,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_INPUT   = Path("AppStore_Scrapdata/App_dataOutput_all10_merged.csv")
+DEFAULT_INPUT   = Path("scraped_data.csv")
 DEFAULT_OUTPUT  = Path("valid_enriched_records.csv")
 DEFAULT_INVALID = Path("invalid_records.csv")
 
@@ -138,6 +142,95 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
             original = df.columns[0]
             df = df.rename(columns={original: "bundle_id"})
             log.info("Single-column input — renamed '%s' → 'bundle_id'.", original)
+    return df
+
+
+def _is_empty(val) -> bool:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return True
+    return str(val).strip() == ""
+
+
+def _released_to_days(released_str: str | None) -> int | None:
+    if not released_str:
+        return None
+    for fmt in ("%b %d, %Y", "%Y-%m-%d", "%B %d, %Y"):
+        try:
+            delta = (
+                datetime.now(timezone.utc).replace(tzinfo=None)
+                - datetime.strptime(str(released_str), fmt)
+            )
+            return max(0, delta.days)
+        except ValueError:
+            continue
+    return None
+
+
+def _scrape_bundle(bundle_id: str) -> dict:
+    data = gps_app(bundle_id, lang="en", country="in")
+    return {
+        "bundle_id": bundle_id,
+        "description": data.get("description"),
+        "summary": data.get("summary"),
+        "genreid": data.get("genreId"),
+        "content_rating": data.get("contentRating"),
+        "score": data.get("score"),
+        "ratings_count": data.get("ratings"),
+        "installs": data.get("realInstalls") or data.get("installs"),
+        "developerid": data.get("developerId"),
+        "developer": data.get("developer"),
+        "free": data.get("free"),
+        "offers_iap": data.get("offersIAP"),
+        "days_since_released": _released_to_days(data.get("released")),
+        "real_installs": data.get("realInstalls"),
+    }
+
+
+def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill missing required fields by scraping Google Play per bundle ID.
+    Only empty required values are overwritten; existing values are preserved.
+    """
+    df = df.copy()
+    for col in REQUIRED_COLS:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(object)
+
+    needs_scrape = pd.Series(False, index=df.index)
+    for col in REQUIRED_COLS:
+        needs_scrape |= df[col].isna() | (df[col].astype(str).str.strip() == "")
+
+    needs_scrape &= ~(df["bundle_id"].isna() | (df["bundle_id"].astype(str).str.strip() == ""))
+    targets = df.index[needs_scrape]
+    if len(targets) == 0:
+        return df
+
+    log.info("Hydrating missing required fields via Google Play scrape for %d rows …", len(targets))
+    success_count = 0
+
+    if "real_installs" not in df.columns:
+        df["real_installs"] = None
+
+    for idx in targets:
+        bundle_id = str(df.at[idx, "bundle_id"]).strip()
+        try:
+            scraped = _scrape_bundle(bundle_id)
+        except NotFoundError:
+            log.warning("Bundle not found on Play Store: %s", bundle_id)
+            continue
+        except Exception as exc:
+            log.warning("Scrape failed for %s: %s", bundle_id, exc)
+            continue
+
+        for col in REQUIRED_COLS:
+            if _is_empty(df.at[idx, col]) and not _is_empty(scraped.get(col)):
+                df.at[idx, col] = scraped[col]
+        if _is_empty(df.at[idx, "real_installs"]) and not _is_empty(scraped.get("real_installs")):
+            df.at[idx, "real_installs"] = scraped.get("real_installs")
+        success_count += 1
+
+    log.info("Scrape hydrate complete: %d/%d rows fetched.", success_count, len(targets))
     return df
 
 
@@ -298,6 +391,7 @@ def run(
     log.info("Loading data …")
     raw = pd.read_csv(input_path, low_memory=False)
     raw = _normalise_columns(raw)
+    raw = _hydrate_missing_required_fields(raw)
     raw = _resolve_installs(raw)
     log.info("Loaded %d rows, %d columns.", len(raw), len(raw.columns))
 

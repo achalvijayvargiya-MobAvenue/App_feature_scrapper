@@ -11,11 +11,4 @@
 
 *
 
-!.gitignore
-!requirements.txt
-!run_single_bundle.py
-!orchestrate.py
-!fill_invalid_generic.py
-!enrichers/
-!enrichers/**/*.py
 

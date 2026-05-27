@@ -1,9 +1,13 @@
 import argparse
 import logging
 import os
-
+import subprocess
 import sys
 import time
+import io
+import re
+import csv
+import pandas as pd
 from datetime import datetime, timedelta
 from collections import defaultdict
 from urllib.parse import urlparse
@@ -35,10 +39,12 @@ def generate_date_condition(start_date: str, end_date: str) -> str:
         
     return " OR ".join(conditions)
 
+
 def main():
     parser = argparse.ArgumentParser(description="Automate App Feature Scraper from Athena")
     parser.add_argument("--start-date", required=True, help="Start date in YYYY-MM-DD format")
     parser.add_argument("--end-date", required=True, help="End date in YYYY-MM-DD format")
+    parser.add_argument("--limit", type=int, default=None, help="Limit the number of bundles to scrape for testing")
     args = parser.parse_args()
 
     # Load environment variables
@@ -65,17 +71,24 @@ def main():
     date_cond = generate_date_condition(args.start_date, args.end_date)
 
     query = f"""
-    SELECT DISTINCT LOWER(TRIM(pub_bundle)) AS bundle_id
-    FROM {database}.rtb_bids
-    WHERE ({date_cond})
-      AND device_id IS NOT NULL
-      AND device_id NOT IN ('', 'null')
+    SELECT bundle_id FROM (
+        SELECT DISTINCT LOWER(TRIM(pub_bundle)) AS bundle_id
+        FROM {database}.rtb_bids
+        WHERE ({date_cond})
+          AND device_id IS NOT NULL
+          AND device_id NOT IN ('', 'null')
 
-    EXCEPT
+        EXCEPT
 
-    SELECT DISTINCT LOWER(TRIM(bundle_id)) AS bundle_id
-    FROM imp_tables.app_feature_raw_test;
+        SELECT DISTINCT LOWER(TRIM(bundle_id)) AS bundle_id
+        FROM imp_tables.app_feature_raw_test
+    )
     """
+    
+    if args.limit:
+        query += f"\n    LIMIT {args.limit};"
+    else:
+        query += ";"
     
     log.info("Connecting to AWS Athena in %s...", aws_region)
     athena_client = boto3.client(
@@ -128,8 +141,11 @@ def main():
     )
     
     s3_key = f"{prefix}{execution_id}.csv"
+    
+    input_dir = os.path.join(os.path.dirname(__file__), "input_data")
+    os.makedirs(input_dir, exist_ok=True)
     csv_filename = f"athena_output_bundles_{args.start_date}_{args.end_date}.csv"
-    local_csv = os.path.join(os.path.dirname(__file__), csv_filename)
+    local_csv = os.path.join(input_dir, csv_filename)
     
     try:
         s3_client.download_file(bucket, s3_key, local_csv)
@@ -143,27 +159,87 @@ def main():
     except Exception as e:
         log.error("Failed to download CSV from S3: %s", e)
         sys.exit(1)
-        
-    # log.info("Triggering orchestrate.py...")
+
+    log.info("Triggering orchestrate.py...")
     
-    # valid_csv = os.path.join(os.path.dirname(__file__), f"valid_enriched_bundles_{args.start_date}_{args.end_date}.csv")
-    # invalid_csv = os.path.join(os.path.dirname(__file__), f"invalid_bundles_{args.start_date}_{args.end_date}.csv")
+    output_dir = os.path.join(os.path.dirname(__file__), "output_data")
+    os.makedirs(output_dir, exist_ok=True)
+    valid_csv = os.path.join(output_dir, f"valid_enriched_bundles_{args.start_date}_{args.end_date}.csv")
+    invalid_csv = os.path.join(input_dir, f"invalid_bundles_{args.start_date}_{args.end_date}.csv")
     
     # Execute orchestrate.py
-    # cmd = [
-    #     sys.executable,
-    #     os.path.join(os.path.dirname(__file__), "orchestrate.py"),
-    #     "--input", local_csv,
-    #     "--output", valid_csv,
-    #     "--invalid-output", invalid_csv
-    # ]
+    cmd = [
+        sys.executable,
+        os.path.join(os.path.dirname(__file__), "orchestrate.py"),
+        "--input", local_csv,
+        "--output", valid_csv,
+        "--invalid-output", invalid_csv
+    ]
     
-    # try:
-    #     subprocess.run(cmd, check=True)
-    #     log.info("Pipeline completed successfully!")
-    # except subprocess.CalledProcessError as e:
-    #     log.error("orchestrate.py failed with return code %s", e.returncode)
-    #     sys.exit(1)
+    try:
+        subprocess.run(cmd, check=True)
+        log.info("Pipeline completed successfully! Now filtering and cleaning the valid records...")
+        
+        with open(valid_csv, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+
+        def fix_quoted_newlines(text):
+            result = []
+            in_quotes = False
+            i = 0
+            while i < len(text):
+                char = text[i]
+                if char == '"':
+                    in_quotes = not in_quotes
+                    result.append(char)
+                elif in_quotes and char in ("\n", "\r", "\t"):
+                    result.append(" ")
+                else:
+                    result.append(char)
+                i += 1
+            return "".join(result)
+
+        fixed = fix_quoted_newlines(raw)
+        
+        df = pd.read_csv(io.StringIO(fixed), engine="python", on_bad_lines="skip")
+        
+        def clean_text(val):
+            if pd.isna(val):
+                return val
+            val = str(val)
+            val = re.sub(r"<[^>]+>", " ", val)
+            val = re.sub(r"&[a-zA-Z]+;", " ", val)
+            val = val.replace('""', '"')
+            val = re.sub(r"[\r\n\t]+", " ", val)
+            val = re.sub(r"\s+", " ", val)
+            return val.strip()
+
+        for col in df.select_dtypes(include="object").columns:
+            df[col] = df[col].apply(clean_text)
+            
+        for col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except:
+                pass
+                
+        df.to_csv(valid_csv, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+        log.info(f"Data filtering completed. Saved {len(df)} rows and {df.shape[1]} columns. Now uploading to S3...")
+        
+        # Upload valid_csv to mis.app_feature backing S3 location
+        s3_dest_bucket = "mobavenue-simplismart-aws-s3-apse-sg"
+        s3_dest_key = f"rtb/data/mis/app_feature/valid_enriched_bundles_{args.start_date}_{args.end_date}.csv"
+        
+        log.info(f"Uploading {valid_csv} to s3://{s3_dest_bucket}/{s3_dest_key}")
+        s3_client.upload_file(valid_csv, s3_dest_bucket, s3_dest_key)
+        log.info("Upload to S3 completed successfully.")
+        
+    except subprocess.CalledProcessError as e:
+        log.error("orchestrate.py failed with return code %s", e.returncode)
+        sys.exit(1)
+    except Exception as e:
+        log.error("Failed to upload valid records to S3: %s", e)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

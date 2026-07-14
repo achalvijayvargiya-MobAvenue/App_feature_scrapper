@@ -93,7 +93,7 @@ REQUIRED_COLS: list[str] = [
 # Final column order  (matches test.txt schema exactly)
 # ---------------------------------------------------------------------------
 PASSTHROUGH_COLS: list[str] = [
-    "bundle_id", "description", "summary", "genreid",
+    "bundle_id","description", "summary", "genreid",
     "content_rating", "score", "ratings_count", "installs",
     "developerid", "developer", "free", "offers_iap",
     "days_since_released", "months_since_launch",

@@ -5,7 +5,7 @@ End-to-end flow for a single bundle ID: scrape (or load from CSV), fill gaps,
 validate, enrich, and output the full feature row.
 
 Usage:
-    python run_single_bundle.py com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge
+    python run_single_bundle.py tvgam.es
     python run_single_bundle.py com.example.app --from-csv App_dataOutput_all10_filled.csv --output result.csv
 """
 

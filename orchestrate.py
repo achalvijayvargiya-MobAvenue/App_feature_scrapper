@@ -46,6 +46,7 @@ import sys
 from pathlib import Path
 from functools import reduce
 from datetime import datetime, timezone
+import concurrent.futures
 
 import pandas as pd
 from google_play_scraper import app as gps_app
@@ -83,7 +84,7 @@ DEFAULT_INVALID = Path("invalid_records.csv")
 # Columns that must be non-null and non-empty to keep a record
 # ---------------------------------------------------------------------------
 REQUIRED_COLS: list[str] = [
-    "bundle_id", "description", "summary", "genreid",
+    "bundle_id", "app_name", "description", "summary", "genreid",
     "content_rating", "score", "ratings_count", "installs",
     "developerid", "developer", "free", "offers_iap",
     "days_since_released",
@@ -93,7 +94,7 @@ REQUIRED_COLS: list[str] = [
 # Final column order  (matches test.txt schema exactly)
 # ---------------------------------------------------------------------------
 PASSTHROUGH_COLS: list[str] = [
-    "bundle_id","description", "summary", "genreid",
+    "bundle_id", "app_name", "description", "summary", "genreid",
     "content_rating", "score", "ratings_count", "installs",
     "developerid", "developer", "free", "offers_iap",
     "days_since_released", "months_since_launch",
@@ -170,6 +171,7 @@ def _scrape_bundle(bundle_id: str) -> dict:
     data = gps_app(bundle_id, lang="en", country="in")
     return {
         "bundle_id": bundle_id,
+        "app_name": data.get("title"),
         "description": data.get("description"),
         "summary": data.get("summary"),
         "genreid": data.get("genreId"),
@@ -202,7 +204,7 @@ def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
         needs_scrape |= df[col].isna() | (df[col].astype(str).str.strip() == "")
 
     needs_scrape &= ~(df["bundle_id"].isna() | (df["bundle_id"].astype(str).str.strip() == ""))
-    targets = df.index[needs_scrape]
+    targets = df.index[needs_scrape].tolist()
     if len(targets) == 0:
         return df
 
@@ -212,23 +214,30 @@ def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
     if "real_installs" not in df.columns:
         df["real_installs"] = None
 
-    for idx in targets:
+    def fetch_data(idx):
         bundle_id = str(df.at[idx, "bundle_id"]).strip()
         try:
             scraped = _scrape_bundle(bundle_id)
+            return idx, scraped, None
         except NotFoundError:
-            log.warning("Bundle not found on Play Store: %s", bundle_id)
-            continue
+            return idx, None, f"Bundle not found on Play Store: {bundle_id}"
         except Exception as exc:
-            log.warning("Scrape failed for %s: %s", bundle_id, exc)
-            continue
+            return idx, None, f"Scrape failed for {bundle_id}: {exc}"
 
-        for col in REQUIRED_COLS:
-            if _is_empty(df.at[idx, col]) and not _is_empty(scraped.get(col)):
-                df.at[idx, col] = scraped[col]
-        if _is_empty(df.at[idx, "real_installs"]) and not _is_empty(scraped.get("real_installs")):
-            df.at[idx, "real_installs"] = scraped.get("real_installs")
-        success_count += 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_data, idx): idx for idx in targets}
+        for future in concurrent.futures.as_completed(futures):
+            idx, scraped, err = future.result()
+            if err:
+                log.warning(err)
+                continue
+            
+            for col in REQUIRED_COLS:
+                if _is_empty(df.at[idx, col]) and not _is_empty(scraped.get(col)):
+                    df.at[idx, col] = scraped[col]
+            if _is_empty(df.at[idx, "real_installs"]) and not _is_empty(scraped.get("real_installs")):
+                df.at[idx, "real_installs"] = scraped.get("real_installs")
+            success_count += 1
 
     log.info("Scrape hydrate complete: %d/%d rows fetched.", success_count, len(targets))
     return df
@@ -277,6 +286,7 @@ def _select_passthrough(df: pd.DataFrame) -> pd.DataFrame:
     """Extract only the base columns we need to pass through to the output."""
     base = pd.DataFrame()
     base["bundle_id"]           = df.get("bundle_id", "")
+    base["app_name"]            = df.get("app_name", "")
     base["description"]         = df.get("description", "")
     base["summary"]             = df.get("summary", "")
     base["genreid"]             = df.get("genreid", "")

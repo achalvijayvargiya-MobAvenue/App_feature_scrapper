@@ -5,7 +5,7 @@ End-to-end flow for a single bundle ID: scrape (or load from CSV), fill gaps,
 validate, enrich, and output the full feature row.
 
 Usage:
-    python run_single_bundle.py tvgam.es
+    python run_single_bundle.py com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge
     python run_single_bundle.py com.example.app --from-csv App_dataOutput_all10_filled.csv --output result.csv
 """
 
@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+# pyrefly: ignore [missing-import]
 from google_play_scraper import app as gps_app
+# pyrefly: ignore [missing-import]
 from google_play_scraper.exceptions import NotFoundError
 
 from fill_invalid_generic import FILLABLE_COLS, _derive_fill_values, _is_empty
@@ -135,6 +137,11 @@ def run_single_bundle(
             output_path,
             invalid_output=Path(temp_path.parent / "single_bundle_invalid.csv"),
         )
+        if output_path.exists():
+            out_df = pd.read_csv(output_path, low_memory=False)
+            out_df["country_code"] = "IND"
+            out_df["os_type"] = "ANDROID"
+            out_df.to_csv(output_path, index=False)
     finally:
         temp_path.unlink(missing_ok=True)
 

@@ -59,6 +59,7 @@ def _scrape_bundle(bundle_id: str) -> pd.DataFrame:
 
     row = {
         "bundle_id": bundle_id,
+        "app_name": data.get("title"),
         "description": data.get("description"),
         "summary": data.get("summary"),
         "genreid": data.get("genreId"),
@@ -70,6 +71,7 @@ def _scrape_bundle(bundle_id: str) -> pd.DataFrame:
         "developer": data.get("developer"),
         "free": data.get("free"),
         "offers_iap": data.get("offersIAP"),
+        "launch_date": data.get("released"),
         "days_since_released": days,
         "real_installs": data.get("realInstalls"),
     }

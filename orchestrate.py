@@ -87,7 +87,7 @@ REQUIRED_COLS: list[str] = [
     "bundle_id", "app_name", "description", "summary", "genreid",
     "content_rating", "score", "ratings_count", "installs",
     "developerid", "developer", "free", "offers_iap",
-    "days_since_released",
+    "launch_date", "days_since_released", "months_since_launch",
 ]
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ PASSTHROUGH_COLS: list[str] = [
     "bundle_id", "app_name", "description", "summary", "genreid",
     "content_rating", "score", "ratings_count", "installs",
     "developerid", "developer", "free", "offers_iap",
-    "days_since_released", "months_since_launch",
+    "launch_date", "days_since_released", "months_since_launch",
 ]
 
 FINAL_COLS: list[str] = PASSTHROUGH_COLS + [
@@ -183,6 +183,7 @@ def _scrape_bundle(bundle_id: str) -> dict:
         "developer": data.get("developer"),
         "free": data.get("free"),
         "offers_iap": data.get("offersIAP"),
+        "launch_date": data.get("released"),
         "days_since_released": _released_to_days(data.get("released")),
         "real_installs": data.get("realInstalls"),
     }
@@ -298,6 +299,7 @@ def _select_passthrough(df: pd.DataFrame) -> pd.DataFrame:
     base["developer"]           = df.get("developer", "")
     base["free"]                = df.get("free", "")
     base["offers_iap"]          = df.get("offers_iap", "")
+    base["launch_date"]         = df.get("launch_date", "")
     base["days_since_released"] = df.get("days_since_released", "")
     base["months_since_launch"] = _derive_months(df)
     return base.reset_index(drop=True)

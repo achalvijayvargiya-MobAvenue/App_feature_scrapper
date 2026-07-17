@@ -18,4 +18,5 @@
 !fill_invalid_generic.py
 !enrichers/
 !enrichers/**/*.py
+!run_pipeline.py
 

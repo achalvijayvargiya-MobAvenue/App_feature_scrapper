@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# config.yaml — single source of truth for run_pipeline.py
+# ---------------------------------------------------------------------------
+
+aws:
+  region: ap-southeast-1
+  profile: null            # set to an AWS CLI profile name, or leave null to
+                            # use the default credential chain (env vars, IAM
+                            # role, etc.)
+
+s3:
+  bucket: mobavenue-simplismart-aws-s3-apse-sg
+  # Trailing slash matters — used as a prefix for listing/writing.
+  latest_prefix: rtb/data/ml/app_features/latest/
+  base_prefix: rtb/data/ml/app_features/
+
+athena:
+  database: mobavenue_dsp          # database that owns rtb_bids
+  workgroup: primary
+  # Athena needs somewhere to write query results/metadata. This is NOT the
+  # same as your data bucket above — point it at your Athena results bucket.
+  output_location: s3://mobavenue-simplismart-aws-s3-apse-sg/athena-query-results/
+  # The "already have features for" table on the right side of EXCEPT.
+  existing_features_table: imp_tables.app_feature_raw_test
+
+query:
+  year: 2026
+  month: 7
+  days: [12, 13, 14]         # -> day IN (13, 14)
+  rtb_bids_table: rtb_bids   # lives inside athena.database
+
+scraping:
+  lang: en
+  country: in
+  # Cap how many newly-discovered bundle_ids get scraped/enriched per run.
+  # Set to null for no limit (process everything the EXCEPT query returns).
+  max_bundles_per_run: null
+
+output:
+
+  # Each run writes a NEW file into the "latest" folder — nothing existing
+  # there is read, merged, or overwritten. {date} is replaced with the
+  # run date (YYYYMMDD).
+  latest_filename_pattern: "app_data_{date}.csv"

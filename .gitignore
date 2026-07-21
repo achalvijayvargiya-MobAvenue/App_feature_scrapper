@@ -9,7 +9,10 @@
 # will be ignored by default.
 #
 
-*
+.DS_Store
+README.md
+__pycache__/
+enrichers/__pycache__/
 
 !.gitignore
 !requirements.txt
@@ -20,4 +23,3 @@
 !enrichers/**/*.py
 !run_pipeline.py
 !config.yaml
-!pipeline/

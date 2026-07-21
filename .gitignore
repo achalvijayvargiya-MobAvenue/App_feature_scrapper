@@ -20,4 +20,4 @@
 !enrichers/**/*.py
 !run_pipeline.py
 !config.yaml
-!pipeline
+!pipeline/

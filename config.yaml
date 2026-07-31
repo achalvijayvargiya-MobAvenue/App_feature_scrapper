@@ -11,8 +11,8 @@ aws:
 s3:
   bucket: mobavenue-simplismart-aws-s3-apse-sg
   # Trailing slash matters — used as a prefix for listing/writing.
-  latest_prefix: rtb/data/ml/app_features/latest/
-  base_prefix: rtb/data/ml/app_features/
+  latest_prefix: rtb/data/aayushi/app_features/latest/
+  base_prefix: rtb/data/aayushi/app_features/
 
 athena:
   database: mobavenue_dsp          # database that owns rtb_bids
@@ -26,7 +26,7 @@ athena:
 query:
   year: 2026
   month: 7
-  days: [12, 13, 14]         # -> day IN (13, 14)
+  days: [28]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
 
 scraping:
@@ -34,7 +34,7 @@ scraping:
   country: in
   # Cap how many newly-discovered bundle_ids get scraped/enriched per run.
   # Set to null for no limit (process everything the EXCEPT query returns).
-  max_bundles_per_run: null
+  max_bundles_per_run: 100
 
 output:
 

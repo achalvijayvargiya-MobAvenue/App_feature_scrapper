@@ -21,12 +21,12 @@ athena:
   # same as your data bucket above — point it at your Athena results bucket.
   output_location: s3://mobavenue-simplismart-aws-s3-apse-sg/athena-query-results/
   # The "already have features for" table on the right side of EXCEPT.
-  existing_features_table: imp_tables.app_feature_raw_test
+  existing_features_table: prod.app_features
 
 query:
   year: 2026
   month: 7
-  days: [12, 13, 14]         # -> day IN (13, 14)
+  days: [24, 25]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
 
 scraping:
@@ -34,7 +34,7 @@ scraping:
   country: in
   # Cap how many newly-discovered bundle_ids get scraped/enriched per run.
   # Set to null for no limit (process everything the EXCEPT query returns).
-  max_bundles_per_run: null
+  max_bundles_per_run: 5000
 
 output:
 

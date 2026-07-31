@@ -1,8 +1,9 @@
 """
 run_single_bundle.py
 ====================
-End-to-end flow for a single bundle ID: scrape (or load from CSV), fill gaps,
-validate, enrich, and output the full feature row.
+End-to-end flow for a single bundle ID: look it up in an existing CSV if
+given, then hand off to orchestrate.run() — which scrapes any missing
+fields, fills defaults, validates, and enriches.
 
 Usage:
     python run_single_bundle.py com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge
@@ -11,18 +12,11 @@ Usage:
 
 import argparse
 import logging
-import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-# pyrefly: ignore [missing-import]
-from google_play_scraper import app as gps_app
-# pyrefly: ignore [missing-import]
-from google_play_scraper.exceptions import NotFoundError
 
-from fill_invalid_generic import FILLABLE_COLS, _derive_fill_values, _is_empty
 from orchestrate import run as orchestrate_run
 
 logging.basicConfig(
@@ -31,51 +25,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-
-def _scrape_bundle(bundle_id: str) -> pd.DataFrame:
-    """Scrape a single bundle ID from Play Store and return a 1-row DataFrame."""
-    try:
-        data = gps_app(bundle_id, lang="en", country="in")
-    except NotFoundError:
-        log.error("Bundle not found on Play Store: %s", bundle_id)
-        sys.exit(1)
-    except Exception as exc:
-        log.error("Scrape failed: %s", exc)
-        sys.exit(1)
-
-    released_str = data.get("released") or ""
-    days = None
-    for fmt in ("%b %d, %Y", "%Y-%m-%d", "%B %d, %Y"):
-        try:
-            delta = (
-                datetime.now(timezone.utc).replace(tzinfo=None)
-                - datetime.strptime(released_str, fmt)
-            )
-            days = max(0, delta.days)
-            break
-        except ValueError:
-            continue
-
-    row = {
-        "bundle_id": bundle_id,
-        "app_name": data.get("title"),
-        "description": data.get("description"),
-        "summary": data.get("summary"),
-        "genreid": data.get("genreId"),
-        "content_rating": data.get("contentRating"),
-        "score": data.get("score"),
-        "ratings_count": data.get("ratings"),
-        "installs": data.get("realInstalls") or data.get("installs"),
-        "developerid": data.get("developerId"),
-        "developer": data.get("developer"),
-        "free": data.get("free"),
-        "offers_iap": data.get("offersIAP"),
-        "launch_date": data.get("released"),
-        "days_since_released": days,
-        "real_installs": data.get("realInstalls"),
-    }
-    return pd.DataFrame([row])
 
 
 def _load_from_csv(csv_path: Path, bundle_id: str) -> pd.DataFrame | None:
@@ -91,23 +40,6 @@ def _load_from_csv(csv_path: Path, bundle_id: str) -> pd.DataFrame | None:
     return df[mask].copy()
 
 
-def _apply_fill_generic(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing score, ratings_count, days_since_released with derived values."""
-    df = df.copy()
-    for col in FILLABLE_COLS:
-        if col not in df.columns:
-            df[col] = ""
-        df[col] = df[col].astype(object)
-
-    for idx in df.index:
-        record = df.loc[idx].to_dict()
-        derived = _derive_fill_values(record)
-        for col in FILLABLE_COLS:
-            if _is_empty(record.get(col)):
-                df.at[idx, col] = derived[col]
-    return df
-
-
 def run_single_bundle(
     bundle_id: str,
     *,
@@ -116,34 +48,26 @@ def run_single_bundle(
 ) -> None:
     bundle_id = bundle_id.strip()
 
+    df = None
     if from_csv and from_csv.exists():
         log.info("Loading from %s …", from_csv.resolve())
         df = _load_from_csv(from_csv, bundle_id)
         if df is None:
-            log.warning("Bundle not found in CSV. Scraping …")
-            df = _scrape_bundle(bundle_id)
-    else:
-        log.info("Scraping Play Store for %s …", bundle_id)
-        df = _scrape_bundle(bundle_id)
+            log.warning("Bundle not found in CSV. Will scrape via orchestrate.")
 
-    log.info("Applying fill_invalid_generic for any missing values …")
-    df = _apply_fill_generic(df)
+    if df is None:
+        df = pd.DataFrame([{"bundle_id": bundle_id}])
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
         temp_path = Path(f.name)
     try:
         df.to_csv(temp_path, index=False)
-        log.info("Running orchestrate (validate + enrich) …")
+        log.info("Running orchestrate (scrape + validate + enrich) …")
         orchestrate_run(
             temp_path,
             output_path,
             invalid_output=Path(temp_path.parent / "single_bundle_invalid.csv"),
         )
-        if output_path.exists():
-            out_df = pd.read_csv(output_path, low_memory=False)
-            out_df["country_code"] = "IND"
-            out_df["os_type"] = "ANDROID"
-            out_df.to_csv(output_path, index=False)
     finally:
         temp_path.unlink(missing_ok=True)
 

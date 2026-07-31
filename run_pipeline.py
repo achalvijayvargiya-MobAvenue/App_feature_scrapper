@@ -42,7 +42,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline.s3_utils import make_s3_client, upload_file
 from pipeline.athena_utils import run_query_to_dataframe
-from pipeline.clean_output import clean_dataframe, add_default_columns
+from pipeline.clean_output import clean_dataframe
 
 try:
     from orchestrate import run as orchestrate_run  # your existing script
@@ -74,6 +74,7 @@ WHERE year = {q['year']}
   AND day IN ({days_sql})
   AND device_id IS NOT NULL
   AND device_id NOT IN ('', 'null')
+  AND country_code = 'IND'
 
 EXCEPT
 
@@ -161,7 +162,6 @@ def step4_clean_and_publish(cfg: dict, s3, enriched_csv: Path, workdir: Path, da
 
     new_df = pd.read_csv(enriched_csv, low_memory=False)
     new_df = clean_dataframe(new_df)
-    new_df = add_default_columns(new_df)
     log.info("Cleaned rows ready to publish: %d", len(new_df))
 
     filename = cfg["output"]["latest_filename_pattern"].format(date=date_str)

@@ -59,15 +59,3 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             log.info("  Dropped %d rows with invalid bundle_id", dropped)
 
     return df.reset_index(drop=True)
-
-
-def add_default_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Stamp every row with the constant columns the rest of the pipeline
-    doesn't otherwise produce. Overwrites the columns if they already
-    exist, so re-running this is always safe.
-    """
-    df = df.copy()
-    df["country_code"] = "IND"
-    df["os_type"] = "ANDROID"
-    return df

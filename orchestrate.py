@@ -42,6 +42,7 @@ Usage:
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 from functools import reduce
@@ -62,6 +63,7 @@ from enrichers import (
     content_rating_flagger,
 )
 from enrichers.category_mapper import CATEGORY_COLS
+from fill_invalid_generic import fill as fill_defaults
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -98,7 +100,16 @@ PASSTHROUGH_COLS: list[str] = [
     "content_rating", "score", "ratings_count", "installs",
     "developerid", "developer", "free", "offers_iap",
     "launch_date", "days_since_released", "months_since_launch",
+    "country_code", "os_type", "default",
 ]
+
+# country_code/os_type are static metadata, not 0/1 enrichment flags — kept
+# out of coverage_report()'s flag_cols so it doesn't try to sum/average them.
+STATIC_METADATA_COLS: list[str] = ["country_code", "os_type"]
+
+# Fixed values for the static metadata columns above
+COUNTRY_CODE = "IND"
+OS_TYPE = "ANDROID"
 
 FINAL_COLS: list[str] = PASSTHROUGH_COLS + [
     # category flags (from category_mapper.CATEGORY_COLS)
@@ -150,6 +161,56 @@ def _is_empty(val) -> bool:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return True
     return str(val).strip() == ""
+
+
+def _strip_newlines(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Replace embedded newlines/carriage returns in text columns with a space.
+
+    Athena's OpenCSVSerde reads line-by-line and does not honour quoted
+    newlines inside a CSV field — an app description spanning multiple
+    lines would otherwise shred one logical row into several broken rows
+    once uploaded. This keeps every record on a single physical line.
+    """
+    df = df.copy()
+    text_cols = df.select_dtypes(include="object").columns
+    for col in text_cols:
+        df[col] = df[col].apply(
+            lambda v: " ".join(str(v).splitlines()) if not _is_empty(v) else v
+        )
+    return df
+
+
+_INSTALLS_STRIP = re.compile(r"[,+\s]")
+_INSTALLS_SUFFIX_MULTIPLIER = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+_INSTALLS_SUFFIX_RE = re.compile(r"^([\d.]+)([KMB])$", re.IGNORECASE)
+
+
+def _clean_installs(val) -> str:
+    """
+    Normalise an installs value to a plain integer string, handling:
+        1000000               (already numeric, e.g. real_installs)
+        "1,000,000+"          (Western grouping)
+        "1,00,00,000+"        (Indian grouping)
+        "10M+", "500K+"       (letter-suffix shorthand)
+    Returns "" if the value can't be parsed.
+    """
+    if _is_empty(val):
+        return ""
+    if isinstance(val, (int, float)):
+        return str(int(val)) if val > 0 else ""
+
+    cleaned = re.sub(_INSTALLS_STRIP, "", str(val).strip())
+    m = _INSTALLS_SUFFIX_RE.match(cleaned)
+    if m:
+        num_part, suffix = m.groups()
+        num = pd.to_numeric(num_part, errors="coerce")
+        if pd.isna(num):
+            return ""
+        return str(int(float(num) * _INSTALLS_SUFFIX_MULTIPLIER[suffix.upper()]))
+
+    num = pd.to_numeric(cleaned, errors="coerce")
+    return str(int(num)) if pd.notna(num) and num > 0 else ""
 
 
 def _released_to_days(released_str: str | None) -> int | None:
@@ -225,7 +286,7 @@ def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
         except Exception as exc:
             return idx, None, f"Scrape failed for {bundle_id}: {exc}"
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(fetch_data, idx): idx for idx in targets}
         for future in concurrent.futures.as_completed(futures):
             idx, scraped, err = future.result()
@@ -246,28 +307,29 @@ def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 def _resolve_installs(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prefer ``real_installs`` over ``installs`` when available.
+    Prefer ``real_installs`` over ``installs`` when available, then clean
+    whatever ends up in ``installs`` to a plain integer string (strips
+    commas, "+", and K/M/B suffixes like "10M+" or "1,00,00,000+").
     Drops the ``real_installs`` column after merging.
     """
-    if "real_installs" not in df.columns:
-        return df
+    df = df.copy()
+    df["installs"] = df["installs"].astype(object)
 
-    real = pd.to_numeric(df["real_installs"], errors="coerce")
-    has_real = real.notna() & (real > 0)
+    if "real_installs" in df.columns:
+        real = pd.to_numeric(df["real_installs"], errors="coerce")
+        has_real = real.notna() & (real > 0)
+        if has_real.any():
+            log.info(
+                "install resolution — using real_installs for %d rows, "
+                "installs (bucket) fallback for %d rows.",
+                int(has_real.sum()),
+                int((~has_real).sum()),
+            )
+            vals = real[has_real].astype("Int64")
+            df.loc[has_real, "installs"] = vals.astype(str)
+        df = df.drop(columns=["real_installs"])
 
-    if has_real.any():
-        log.info(
-            "install resolution — using real_installs for %d rows, "
-            "installs (bucket) fallback for %d rows.",
-            int(has_real.sum()),
-            int((~has_real).sum()),
-        )
-        df = df.copy()
-        df["installs"] = df["installs"].astype(object)  # allow str or int
-        vals = real[has_real].astype("Int64")
-        df.loc[has_real, "installs"] = vals.astype(str)
-
-    df = df.drop(columns=["real_installs"])
+    df["installs"] = df["installs"].apply(_clean_installs)
     return df
 
 
@@ -302,6 +364,7 @@ def _select_passthrough(df: pd.DataFrame) -> pd.DataFrame:
     base["launch_date"]         = df.get("launch_date", "")
     base["days_since_released"] = df.get("days_since_released", "")
     base["months_since_launch"] = _derive_months(df)
+    base["default"]             = df.get("default", False)
     return base.reset_index(drop=True)
 
 
@@ -391,6 +454,7 @@ def run(
     output_path: Path,
     *,
     invalid_output: Path,
+    skip_scrape: bool = False,
 ) -> None:
     log.info(SEPARATOR)
     log.info("ORCHESTRATE — Validate & Enrich Pipeline")
@@ -403,9 +467,16 @@ def run(
     log.info("Loading data …")
     raw = pd.read_csv(input_path, low_memory=False)
     raw = _normalise_columns(raw)
-    raw = _hydrate_missing_required_fields(raw)
+    if skip_scrape:
+        log.info("skip_scrape=True — not re-scraping Google Play for missing fields.")
+    else:
+        raw = _hydrate_missing_required_fields(raw)
     raw = _resolve_installs(raw)
     log.info("Loaded %d rows, %d columns.", len(raw), len(raw.columns))
+
+    # ── 1b. Fill remaining gaps with default values ──────────────────────────
+    log.info("Filling missing fields with default values …")
+    raw = fill_defaults(raw)
 
     # ── 2. Filter invalid records ─────────────────────────────────────────────
     log.info("Validating records …")
@@ -444,6 +515,9 @@ def run(
     enriched = _merge_enrichments([base] + enrichment_parts)
 
     # ── 6. Select & order final columns ───────────────────────────────────────
+    enriched["country_code"] = COUNTRY_CODE
+    enriched["os_type"] = OS_TYPE
+
     missing_cols = [c for c in FINAL_COLS if c not in enriched.columns]
     if missing_cols:
         log.warning("Expected columns not found (will be blank): %s", missing_cols)
@@ -451,9 +525,13 @@ def run(
             enriched[c] = None
 
     final = enriched[FINAL_COLS]
+    final = _strip_newlines(final)
 
     # ── 7. Coverage report ────────────────────────────────────────────────────
-    flag_cols = [c for c in FINAL_COLS if c not in PASSTHROUGH_COLS]
+    flag_cols = [
+        c for c in FINAL_COLS
+        if c not in PASSTHROUGH_COLS and c not in STATIC_METADATA_COLS
+    ]
     coverage_report(final, flag_cols)
 
     # ── 8. Save valid enriched output ─────────────────────────────────────────
@@ -491,6 +569,15 @@ def _parse_args() -> argparse.Namespace:
             "Pass this file to llm_fallback.py to attempt recovery."
         ),
     )
+    p.add_argument(
+        "--skip-scrape", action="store_true",
+        help=(
+            "Do not re-scrape Google Play for missing required fields. "
+            "Use this when --input is already-scraped data (e.g. a previous "
+            "invalid_records.csv) and you only want defaulting + validation + "
+            "enrichment applied."
+        ),
+    )
     return p.parse_args()
 
 
@@ -505,4 +592,5 @@ if __name__ == "__main__":
         args.input,
         args.output,
         invalid_output=args.invalid_output,
+        skip_scrape=args.skip_scrape,
     )

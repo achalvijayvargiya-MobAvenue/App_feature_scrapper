@@ -1,6 +1,6 @@
 """
-run_single_bundle_ios.py
-========================
+ios/run_single_bundle.py
+=========================
 Entry point for scraping and enriching a single iOS app.
 """
 

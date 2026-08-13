@@ -9,6 +9,7 @@ import logging
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,21 @@ def _fetch_itunes_data(app_id: str, country: str = "in", retries: int = 3) -> Di
             
     raise ScraperError(f"Max retries exceeded for {app_id}")
 
+def _normalize_launch_date(release_date: Optional[str]) -> Optional[str]:
+    """
+    Apple returns releaseDate as ISO 8601, e.g. "2010-04-01T21:02:20Z".
+    Normalize to "%b %d, %Y" (e.g. "Apr 01, 2010") to match the format
+    google_play_scraper's 'released' field already uses for Android, so
+    launch_date is consistent across both platforms.
+    """
+    if not release_date:
+        return None
+    try:
+        dt = datetime.strptime(str(release_date)[:10], "%Y-%m-%d")
+        return dt.strftime("%b %d, %Y")
+    except ValueError:
+        return release_date
+
 def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
     """
     Query the iTunes API for an iOS app by its numeric ID or bundle ID.
@@ -68,10 +84,6 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
     app_info = _fetch_itunes_data(app_id, country)
 
     description = app_info.get("description", "")
-    subtitle = app_info.get("subtitle", "")
-    if not subtitle and description:
-        # Fallback to description snippet if no subtitle
-        subtitle = description[:100] + "..." if len(description) > 100 else description
 
     price = app_info.get("price")
     is_free = (price == 0.0) if price is not None else True
@@ -83,8 +95,10 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
         "bundle_id": app_id,
         "app_name": app_info.get("trackName"),
         "description": description,
-        "summary": subtitle,
-        "genreid": str(app_info.get("primaryGenreId", "")),
+        # iTunes API has no subtitle/summary field on this endpoint. "Not Available" is
+        # used instead of "NA"/"N/A" because pandas treats those as null on CSV re-read.
+        "summary": "Not Available",
+        "genreid": app_info.get("primaryGenreName"),
         "content_rating": app_info.get("trackContentRating") or app_info.get("contentAdvisoryRating"),
         "score": app_info.get("averageUserRating"),
         "ratings_count": app_info.get("userRatingCount"),
@@ -93,7 +107,7 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
         "developer": app_info.get("artistName"),
         "free": is_free,
         "offers_iap": offers_iap,
-        "launch_date": app_info.get("releaseDate"),
+        "launch_date": _normalize_launch_date(app_info.get("releaseDate")),
         "real_installs": None,
         "country_code": "IND",
         "os_type": "IOS",

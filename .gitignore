@@ -1,9 +1,7 @@
 #
 # Minimal, runnable repo whitelist
 # --------------------------------
-# Goal: keep only code required to run:
-#   - run_single_bundle.py
-#   - orchestrate.py
+# Goal: keep only code required to run the android/ and ios/ pipelines.
 #
 # Everything else (CSV/XLSX datasets, notebooks, logs, reports, etc.)
 # will be ignored by default.
@@ -12,14 +10,16 @@
 .DS_Store
 README.md
 __pycache__/
-enrichers/__pycache__/
 
 !.gitignore
 !requirements.txt
-!run_single_bundle.py
-!orchestrate.py
 !fill_invalid_generic.py
-!enrichers/
-!enrichers/**/*.py
 !run_pipeline.py
+!combine.py
 !config.yaml
+!pipeline/
+!pipeline/**/*.py
+!android/
+!android/**/*.py
+!ios/
+!ios/**/*.py

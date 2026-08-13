@@ -1,6 +1,6 @@
 """
-run_pipeline_ios.py
-===================
+ios/run_pipeline.py
+====================
 Entry point for running the iOS enrichment pipeline on a batch of apps.
 """
 

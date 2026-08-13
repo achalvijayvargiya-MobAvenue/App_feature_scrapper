@@ -10,17 +10,16 @@ End-to-end daily automation:
   2. Save the new bundle_ids to
          s3://<bucket>/<base_prefix>/<YYYYMMDD>/extracted_bundles.csv
      (YYYYMMDD = today, always).
-  3. Feed extracted_bundles.csv into orchestrate.py's pipeline (which
-     scrapes any missing required fields bundle-by-bundle, validates, and
-     enriches) -> app_data_<YYYYMMDD>.csv, saved under the same dated
-     folder.
+  3. Feed extracted_bundles.csv into both android.pipeline and ios.pipeline
+     (each scrapes, validates, and enriches independently), then combine
+     the two outputs into one CSV via combine.py -> app_data_<YYYYMMDD>.csv,
+     saved under the same dated folder.
   4. Clean/standardize that CSV and upload it as a NEW file inside the
      "latest" S3 folder. Nothing already in "latest" is read, merged, or
      overwritten — each run just adds one more file.
 
-Requires orchestrate.py (and the `enrichers` package it imports) to be
-importable — either drop this file + pipeline/ next to your existing
-orchestrate.py, or add its directory to PYTHONPATH.
+Requires android/, ios/, combine.py, and pipeline/ (this file's siblings)
+to be importable — run from the App_feature_scrapper directory.
 
 Usage:
     python run_pipeline.py --config config.yaml
@@ -42,12 +41,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline.s3_utils import make_s3_client, upload_file
 from pipeline.athena_utils import run_query_to_dataframe
-from pipeline.clean_output import clean_dataframe, add_default_columns
+from pipeline.clean_output import clean_dataframe
 
-try:
-    from orchestrate import run as orchestrate_run  # your existing script
-except ImportError:
-    orchestrate_run = None  # validated at runtime with a clear error
+import fill_invalid_generic
+from android.pipeline import run_batch_android
+from ios.pipeline import run_batch_ios
+from combine import combine as combine_outputs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,39 +110,115 @@ def step2_save_extracted(cfg: dict, s3, bundles_df: pd.DataFrame, workdir: Path,
     return local_path
 
 
+def _segregate_bundles(extracted_csv: Path, workdir: Path, id_col: str = "bundle_id") -> tuple[Path, Path]:
+    """
+    Split a combined bundle_id list into Android and iOS candidate files
+    before either pipeline scrapes anything.
+
+    Apple App Store IDs are purely numeric (e.g. "310633997"); Play Store
+    bundle IDs and iOS reverse-domain bundle IDs (e.g. "com.whatsapp",
+    "net.whatsapp.WhatsApp") share the same string shape and can't be told
+    apart without an API call, so the rule is: numeric -> iOS, everything
+    else -> Android. rtb_bids logs iOS impressions by numeric App Store ID
+    in practice, so this covers the real split without throwing the whole
+    combined list at both APIs (Apple's ~20 req/min limit makes that
+    especially wasteful when iOS is the minority of traffic).
+    """
+    df = pd.read_csv(extracted_csv, low_memory=False)
+    df.columns = [c.lower() for c in df.columns]
+
+    # Reindex back to df's full index so rows with a null bundle_id (dropped
+    # by dropna()) don't shrink the boolean mask relative to df — those rows
+    # are treated as "not iOS" (they fall into Android, same as any other
+    # unresolvable bundle_id, rather than crashing df.loc[mask]).
+    ids = df[id_col].dropna().astype(str).str.strip()
+    is_ios = ids.str.isdigit().reindex(df.index, fill_value=False)
+
+    android_path = workdir / "extracted_bundles_android.csv"
+    ios_path = workdir / "extracted_bundles_ios.csv"
+    df.loc[~is_ios].to_csv(android_path, index=False)
+    df.loc[is_ios].to_csv(ios_path, index=False)
+
+    log.info("Segregated bundle_ids — android: %d  ios: %d", int((~is_ios).sum()), int(is_ios.sum()))
+    return android_path, ios_path
+
+
+def _cap_bundles(csv_path: Path, limit: int | None, label: str) -> Path:
+    """Trim a segregated bundle_id file to at most `limit` rows, in place."""
+    if not limit:
+        return csv_path
+    df = pd.read_csv(csv_path, low_memory=False)
+    if len(df) > limit:
+        log.info("Limiting %s run to %d of %d discovered bundle_ids (scraping.max_bundles_per_platform).",
+                  label, limit, len(df))
+        df = df.head(limit)
+        df.to_csv(csv_path, index=False)
+    return csv_path
+
+
 # ---------------------------------------------------------------------------
 # Step 3
 # ---------------------------------------------------------------------------
 def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str) -> Path:
     log.info(SEPARATOR)
-    log.info("STEP 3 — Scrape / validate / enrich via orchestrate.run()")
+    log.info("STEP 3 — Scrape / validate / enrich (Android + iOS) and combine")
     log.info(SEPARATOR)
-    if orchestrate_run is None:
-        raise RuntimeError(
-            "Could not import orchestrate.run — make sure orchestrate.py "
-            "(and its `enrichers` package) are on PYTHONPATH, next to this file."
-        )
+
+    android_input, ios_input = _segregate_bundles(extracted_local, workdir)
+
+    per_platform_limit = cfg["scraping"].get("max_bundles_per_platform")
+    android_input = _cap_bundles(android_input, per_platform_limit, "android")
+    ios_input = _cap_bundles(ios_input, per_platform_limit, "ios")
+
+    android_csv = workdir / "android_output.csv"
+    ios_csv = workdir / "ios_output.csv"
+    android_invalid = workdir / "android_invalid.csv"
+    ios_invalid = workdir / "ios_invalid.csv"
+
+    log.info("Fetching Athena fill-default stats (score/ratings_count/installs MODE-MEDIAN) once for this run ...")
+    athena_stats = fill_invalid_generic._fetch_athena_stats()
+
+    run_batch_android(str(android_input), str(android_csv), invalid_output=str(android_invalid),
+                       athena_stats=athena_stats)
+    run_batch_ios(str(ios_input), str(ios_csv), invalid_output=str(ios_invalid),
+                  athena_stats=athena_stats)
+
+    # Every CSV that reaches S3 must be newline-safe (embedded \n/\r inside a
+    # text field like description breaks Athena's CSV SerDe and other
+    # line-based readers downstream) — clean before each upload, not just the
+    # final "latest" publish in step 4.
+    _clean_csv_in_place(android_csv)
+    _clean_csv_in_place(ios_csv)
+
+    for invalid_csv in (android_invalid, ios_invalid):
+        if invalid_csv.exists():
+            _clean_csv_in_place(invalid_csv)
+            bucket = cfg["s3"]["bucket"]
+            key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{invalid_csv.name}"
+            upload_file(s3, invalid_csv, bucket, key)
+            log.info("Unscrapable / invalid bundles archived to s3://%s/%s", bucket, key)
 
     output_csv = workdir / f"app_data_{date_str}.csv"
-    invalid_csv = workdir / f"app_data_{date_str}_invalid.csv"
-
-    # orchestrate.run() will bundle-wise scrape any required fields that are
-    # missing — extracted_bundles.csv only needs a bundle_id column.
-    orchestrate_run(extracted_local, output_csv, invalid_output=invalid_csv)
-
-    if invalid_csv.exists():
-        bucket = cfg["s3"]["bucket"]
-        key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{invalid_csv.name}"
-        upload_file(s3, invalid_csv, bucket, key)
-        log.info("Unscrapable / invalid bundles archived to s3://%s/%s", bucket, key)
+    combine_outputs(android_csv, ios_csv, output_csv)
 
     if not output_csv.exists():
-        raise RuntimeError("orchestrate.run() produced no valid enriched output — nothing to publish.")
+        raise RuntimeError("combine() produced no output — nothing to publish.")
+
+    _clean_csv_in_place(output_csv)
 
     bucket = cfg["s3"]["bucket"]
     key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{output_csv.name}"
     upload_file(s3, output_csv, bucket, key)
     return output_csv
+
+
+def _clean_csv_in_place(csv_path: Path) -> None:
+    """Run clean_dataframe() over a CSV already on disk and overwrite it."""
+    if not csv_path.exists():
+        return
+    df = pd.read_csv(csv_path, low_memory=False)
+    df = clean_dataframe(df)
+    df.to_csv(csv_path, index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +236,6 @@ def step4_clean_and_publish(cfg: dict, s3, enriched_csv: Path, workdir: Path, da
 
     new_df = pd.read_csv(enriched_csv, low_memory=False)
     new_df = clean_dataframe(new_df)
-    new_df = add_default_columns(new_df)
     log.info("Cleaned rows ready to publish: %d", len(new_df))
 
     filename = cfg["output"]["latest_filename_pattern"].format(date=date_str)

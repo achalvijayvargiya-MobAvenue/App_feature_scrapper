@@ -11,8 +11,8 @@ aws:
 s3:
   bucket: mobavenue-simplismart-aws-s3-apse-sg
   # Trailing slash matters — used as a prefix for listing/writing.
-  latest_prefix: rtb/data/aayushi/app_features/latest/
-  base_prefix: rtb/data/aayushi/app_features/
+  latest_prefix: rtb/data/shreyansh/app_features/latest/
+  base_prefix: rtb/data/shreyansh/app_features/
 
 athena:
   database: mobavenue_dsp          # database that owns rtb_bids
@@ -21,20 +21,26 @@ athena:
   # same as your data bucket above — point it at your Athena results bucket.
   output_location: s3://mobavenue-simplismart-aws-s3-apse-sg/athena-query-results/
   # The "already have features for" table on the right side of EXCEPT.
-  existing_features_table: imp_tables.app_feature_raw_test
+  existing_features_table: prod.app_features
 
 query:
   year: 2026
   month: 7
-  days: [28]         # -> day IN (13, 14)
+  days: [28, 29]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
 
 scraping:
   lang: en
   country: in
   # Cap how many newly-discovered bundle_ids get scraped/enriched per run.
+  # Applied to the COMBINED list before Android/iOS segregation.
   # Set to null for no limit (process everything the EXCEPT query returns).
-  max_bundles_per_run: 100
+  max_bundles_per_run: 10000
+  # Cap applied to EACH platform independently, after Android/iOS
+  # segregation (see run_pipeline.py::_segregate_bundles). Use this when you
+  # want a guaranteed number per OS regardless of how skewed the combined
+  # list is toward one platform. Set to null for no per-platform cap.
+  max_bundles_per_platform: 100
 
 output:
 

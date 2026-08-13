@@ -9,6 +9,7 @@ run_pipeline.py step 5.
 from __future__ import annotations
 
 import logging
+import re
 
 import pandas as pd
 
@@ -21,6 +22,10 @@ STRING_COLS = [
     "content_rating", "developerid", "developer",
 ]
 
+# Play Store reports installs as strings like "0+", "10,000+", "1,000,000+" —
+# strip the grouping commas and trailing "+" before coercing to numeric.
+_INSTALLS_STRIP = re.compile(r"[,+\s]")
+
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -31,6 +36,9 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     df.columns = df.columns.str.lower().str.strip()
+
+    if "installs" in df.columns:
+        df["installs"] = df["installs"].astype(str).str.replace(_INSTALLS_STRIP, "", regex=True)
 
     for col in NUMERIC_COLS:
         if col in df.columns:
@@ -59,15 +67,3 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             log.info("  Dropped %d rows with invalid bundle_id", dropped)
 
     return df.reset_index(drop=True)
-
-
-def add_default_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Stamp every row with the constant columns the rest of the pipeline
-    doesn't otherwise produce. Overwrites the columns if they already
-    exist, so re-running this is always safe.
-    """
-    df = df.copy()
-    df["country_code"] = "IND"
-    df["os_type"] = "ANDROID"
-    return df

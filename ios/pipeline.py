@@ -29,7 +29,7 @@ import pandas as pd
 
 import fill_invalid_generic
 from ios.constants import FINAL_COLUMNS
-from ios.scraper import scrape_ios_bundle, scrape_ios_bundles
+from ios.scraper import scrape_ios_bundle
 from ios.enrichers import (
     category_mapper,
     score_binner,
@@ -153,60 +153,33 @@ def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
 
     records = []
     app_ids = df_in[id_col].dropna().unique()
-    app_ids_list = [str(app_id).strip() for app_id in app_ids]
-    
-    CHUNK_SIZE = 100
-    for i in range(0, len(app_ids_list), CHUNK_SIZE):
+    for i, app_id in enumerate(app_ids):
         if i > 0:
             time.sleep(_REQUEST_INTERVAL_SECONDS)
-            
-        chunk = app_ids_list[i:i+CHUNK_SIZE]
-        log.info("Processing chunk %d to %d (out of %d)...", i + 1, min(i + CHUNK_SIZE, len(app_ids_list)), len(app_ids_list))
-        
+        app_id_str = str(app_id).strip()
+        log.info("Processing %s (%d/%d)...", app_id_str, i + 1, len(app_ids))
         try:
-            chunk_records = scrape_ios_bundles(chunk)
-            
-            # Check which IDs were not found by the API
-            returned_ids = {str(r.get("bundle_id", "")) for r in chunk_records}
-            for app_id_str in chunk:
-                if app_id_str not in returned_ids:
-                    log.warning("Failed to scrape %s: No results found.", app_id_str)
-                    
-            records.extend(chunk_records)
+            records.append(scrape_ios_bundle(app_id_str))
         except Exception as e:
-            log.warning("Failed to scrape chunk starting at %s: %s", chunk[0], e)
+            log.warning("Failed to scrape %s: %s", app_id_str, e)
 
     if not records:
         log.warning("No records were successfully scraped.")
         return
 
     df_raw = pd.DataFrame(records)
-    
-    # Apple's API can occasionally return multiple results for the same app.
-    # We must deduplicate here to prevent a cartesian product explosion during merging.
-    df_raw = df_raw.drop_duplicates(subset=["bundle_id"]).reset_index(drop=True)
-    
     df_raw = fill_invalid_generic.fill(df_raw, stats=athena_stats)
     valid, dropped = _filter_invalid(df_raw)
     log.info("Valid: %d  Invalid: %d", len(valid), len(dropped))
 
+    if len(dropped):
+        dropped.to_csv(invalid_output, index=False)
+        log.info("Invalid records saved -> %s", invalid_output)
+
+    if valid.empty:
+        log.warning("No valid records to enrich. Exiting.")
+        return
+
     df_enriched = enrich_ios_data(valid)
     df_enriched.to_csv(output_path, index=False)
     log.info("Batch processing complete. Output saved to %s", output_path)
-    
-    # Now, handle the invalid/missing ones to ensure the second file has the rest
-    app_ids_list = [str(app_id).strip() for app_id in df_in[id_col].dropna().unique()]
-    valid_ids = set(df_enriched["bundle_id"].astype(str))
-    dropped_ids = set(dropped["bundle_id"].astype(str)) if not dropped.empty else set()
-    
-    missing_ids = set(app_ids_list) - valid_ids - dropped_ids
-    if missing_ids:
-        missing_df = pd.DataFrame({"bundle_id": list(missing_ids)})
-        if len(dropped):
-            dropped = pd.concat([dropped, missing_df], ignore_index=True)
-        else:
-            dropped = missing_df
-            
-    if len(dropped):
-        dropped.to_csv(invalid_output, index=False)
-        log.info("Invalid/Missing records saved -> %s", invalid_output)

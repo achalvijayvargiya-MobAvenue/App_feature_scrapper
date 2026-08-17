@@ -5,9 +5,13 @@ Maps iTunes genres to our specific category flags.
 Also implements keyword-based matching for descriptions and summaries.
 """
 
+import logging
+import ast
 from typing import Any
 import pandas as pd
 from ios.constants import CATEGORY_COLS
+
+log = logging.getLogger(__name__)
 
 # Map iTunes primaryGenreName strings to our category flags.
 # Keyed by genre name (not numeric ID) since primaryGenreName is what the
@@ -15,7 +19,7 @@ from ios.constants import CATEGORY_COLS
 # genre labels as returned by the iTunes Lookup API.
 GENRE_MAP: dict[str, list[str]] = {
     # Games (top-level + subgenres)
-    "Games":               ["is_gaming_action_game"], # Base generic fallback, though usually games have subgenres
+    #"Games":               ["is_gaming_action_game"], # Base generic fallback, though usually games have subgenres
     "Action":              ["is_gaming_action_game"],
     "Adventure":           ["is_gaming_action_game"],
     "Arcade":              ["is_arcade_game"],
@@ -66,35 +70,8 @@ def _wrap_single_words(kw: str) -> str:
     k = kw.strip()
     return k if " " in k else f" {k} "
 
-# Using same keyword definitions as Android for consistency
-SUMMARY_KEYWORD_MAP = {
-    "is_investments": [_wrap_single_words(k) for k in ["invest", "investment", "stock market", "demat", "trading app", "mutual fund", "sip", "broker", "nifty", "sensex", "equity", "portfolio", "stocks", "shares", "intraday", "demat account"]],
-    "is_crypto": [_wrap_single_words(k) for k in ["crypto", "cryptocurrency", "bitcoin", "btc", "ethereum", "blockchain", "defi", "nft", "altcoin", "wallet"]],
-    "is_finance": [_wrap_single_words(k) for k in ["upi", "banking", "emi", "insurance", "netbanking", "neobank", "digital bank", "mobile banking", "payment", "wallet"]],
-    "is_shopping": [_wrap_single_words(k) for k in ["shopping", "ecommerce", "e-commerce", "marketplace", "shop online", "online store", "instamart", "blinkit", "zepto"]],
-    "is_entertainment": [_wrap_single_words(k) for k in ["movie", "movies", "series", "ott", "streaming", "podcast", "playlist", "lyrics", "cinema", "watch videos", "stream music", "short drama", "short dramas", "mini series", "mini drama", "romance drama", "family drama", "revenge drama", "fantasy drama", "emotional story", "emotional stories", "romantic story", "drama series", "drama episodes", "binge watch"]],
-    "is_social": [_wrap_single_words(k) for k in ["chat", "messaging", "dating", "social network", "social media", "make friends", "meet people", "followers"]],
-    "is_education": [_wrap_single_words(k) for k in ["education", "learning", "course", "exam", "mock test", "study", "tutorial", "academy", "syllabus", "revision"]],
-    "is_utility": [_wrap_single_words(k) for k in ["file manager", "file explorer", "cleaner", "booster", "optimizer", "battery saver", "storage cleaner", "task manager", "utility", "productivity"]],
-    "is_health": [_wrap_single_words(k) for k in ["fitness", "workout", "exercise", "gym", "yoga", "calorie", "step counter", "wellness", "meditation", "diet plan"]],
-    "is_travel": [_wrap_single_words(k) for k in ["travel", "flight", "hotel booking", "navigation", "trip planner", "train ticket", "holiday", "vacation", "booking"]],
-    "is_news": [_wrap_single_words(k) for k in ["news", "headline", "breaking news", "newspaper", "news app"]],
-    "is_food_drink": [_wrap_single_words(k) for k in ["food", "restaurant", "dining", "recipe", "cuisine", "meal", "food delivery", "food ordering", "order food", "swiggy", "zomato"]],
-    "is_lending": [_wrap_single_words(k) for k in ["personal loan", "instant loan", "quick loan", "payday loan", "cash advance", "borrow money", "lending", "microloan", "credit line", "fast loan", "easy loan"]],
-    "is_quick_service": [_wrap_single_words(k) for k in ["quick delivery", "10 min delivery", "10 minute delivery", "instant delivery", "express delivery", "doorstep delivery", "blinkit", "zepto", "dunzo", "quick commerce"]],
-    "is_ride": [_wrap_single_words(k) for k in ["cab", "taxi", "ride", "uber", "ola", "ride share", "ride sharing", "cab booking", "book cab", "auto", "bike taxi"]],
-    "is_gaming_action_game": [_wrap_single_words(k) for k in ["action game", "shooter", "fps", "battle", "combat", "adventure game", "multiplayer shooter", "battle royale", "fighting game"]],
-    "is_real_money_card_and_casino_game": [_wrap_single_words(k) for k in ["casino", "slots", "poker", "rummy", "teen patti", "card game", "real money", "real cash", "betting", "gambling"]],
-    "is_word_game": [_wrap_single_words(k) for k in ["word game", "word puzzle", "scrabble", "crossword", "wordle", "spelling", "vocabulary", "word search"]],
-    "is_trivia_and_puzzle_game": [_wrap_single_words(k) for k in ["trivia", "puzzle", "quiz", "brain teaser", "sudoku", "match 3", "puzzle game", "trivia game", "word puzzle"]],
-    "is_strategy_game": [_wrap_single_words(k) for k in ["strategy", "tactical", "chess", "war game", "simulation", "strategy game", "tower defense", "empire building"]],
-    "is_sports_game": [_wrap_single_words(k) for k in ["sports", "cricket", "football", "soccer", "basketball", "tennis", "sports game", "fifa", "cricket game", "sports management"]],
-    "is_simulation_and_role_playing_game": [_wrap_single_words(k) for k in ["rpg", "role playing", "simulation", "simulator", "farm", "tycoon", "idle game", "character", "quest", "mmorpg"]],
-    "is_racing_game": [_wrap_single_words(k) for k in ["racing", "race", "car game", "driving", "motorsport", "racing game", "kart", "asphalt"]],
-    "is_casual_game": [_wrap_single_words(k) for k in ["casual game", "casual", "relaxing", "simple game", "endless", "tap", "idle", "hyper casual"]],
-    "is_board_game": [_wrap_single_words(k) for k in ["board game", "ludo", "carrom", "chess", "checkers", "monopoly", "board", "tabletop"]],
-    "is_arcade_game": [_wrap_single_words(k) for k in ["arcade", "retro", "classic game", "endless runner", "tap to play", "arcade game", "high score"]],
-}
+# SUMMARY_KEYWORD_MAP removed because iTunes API doesn't return a summary/subtitle
+# in the standard lookup endpoint (it is populated as "Not Available").
 
 DESCRIPTION_PHRASE_MAP = {
     "is_investments": ["stock market", "share market", "mutual funds", "demat account", "stock trading", "equity trading", "nifty 50", "sensex", "sip investment", "invest in stocks", "trading platform", "investment portfolio", "stock broker", "intraday trading", "invest your money", "wealth management"],
@@ -127,19 +104,37 @@ DESCRIPTION_PHRASE_MAP = {
 
 _GENRE_MAP_LOWER: dict[str, list[str]] = {k.lower(): v for k, v in GENRE_MAP.items()}
 
-def phase1_genre(genre_name: Any) -> set[str]:
-    if not isinstance(genre_name, str) or not genre_name.strip():
+def phase1_genre(genres_val: Any) -> set[str]:
+    """Phase 1: genre(s) -> category set. Handles both string and list/stringified list of genres."""
+    if pd.isna(genres_val):
         return set()
-    return set(_GENRE_MAP_LOWER.get(genre_name.strip().lower(), []))
+    
+    genres_list = []
+    if isinstance(genres_val, list):
+        genres_list = genres_val
+    elif isinstance(genres_val, str):
+        val = genres_val.strip()
+        if val.startswith('[') and val.endswith(']'):
+            try:
+                genres_list = ast.literal_eval(val)
+            except Exception:
+                genres_list = [val] # Fallback
+        elif ',' in val:
+            genres_list = [g.strip() for g in val.split(',')]
+        else:
+            genres_list = [val]
+    else:
+        return set()
+        
+    mapped_categories = set()
+    for g in genres_list:
+        if isinstance(g, str) and g.strip():
+            mapped_categories.update(_GENRE_MAP_LOWER.get(g.strip().lower(), []))
+            
+    return mapped_categories
 
 def _pad_text(txt: str) -> str:
     return " " + str(txt).lower().strip() + " "
-
-def phase2a_summary(summary: Any) -> set[str]:
-    if not pd.notna(summary) or not str(summary).strip():
-        return set()
-    txt = _pad_text(summary)
-    return {cat for cat, kws in SUMMARY_KEYWORD_MAP.items() if any(kw in txt for kw in kws)}
 
 def phase2b_description(description: Any) -> set[str]:
     if not pd.notna(description) or not str(description).strip():
@@ -147,17 +142,49 @@ def phase2b_description(description: Any) -> set[str]:
     txt = _pad_text(description)
     return {cat for cat, phrases in DESCRIPTION_PHRASE_MAP.items() if any(p in txt for p in phrases)}
 
+def phase_breakdown(df: pd.DataFrame) -> None:
+    """
+    Log per-category contribution from each phase.
+    """
+    genre_col = "genres" if "genres" in df.columns else ("genreid" if "genreid" in df.columns else "genreId")
+
+    p1  = df.apply(lambda r: phase1_genre(r.get(genre_col)), axis=1)
+    p2b = df.apply(lambda r: phase2b_description(r.get("description")), axis=1)
+
+    log.info("Phase breakdown (%d rows)", len(df))
+    log.info("  %-22s  %8s  %8s  %8s  %8s", "category", "p1", "p2b_desc", "multi", "none")
+    log.info("  " + "-" * 65)
+    for cat in CATEGORY_COLS:
+        in_p1  = p1.apply(lambda s: cat in s)
+        in_p2b = p2b.apply(lambda s: cat in s)
+        sources = in_p1.astype(int) + in_p2b.astype(int)
+        log.info(
+            "  %-22s  %8d  %8d  %8d  %8d",
+            cat,
+            int(in_p1.sum()),
+            int(in_p2b.sum()),
+            int((sources >= 2).sum()),
+            int((sources == 0).sum()),
+        )
+    log.info("  " + "-" * 65)
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Input  : DataFrame with [bundle_id, genreid (= primaryGenreName), summary, description]
+    Input  : DataFrame with [bundle_id, genres/genreid, description]
     Output : DataFrame with [bundle_id] + binary category flag columns
     """
-    def _map_row(genre_name: Any, summary: Any, description: Any) -> dict[str, int]:
-        combined = phase1_genre(genre_name) | phase2a_summary(summary) | phase2b_description(description)
+    genre_col = "genres" if "genres" in df.columns else ("genreid" if "genreid" in df.columns else "genreId")
+    log.info(
+        "category_mapper: %d rows | phase1=genres/genreid  phase2b=description-phrases",
+        len(df),
+    )
+
+    def _map_row(genre_val: Any, description: Any) -> dict[str, int]:
+        combined = phase1_genre(genre_val) | phase2b_description(description)
         return {col: int(col in combined) for col in CATEGORY_COLS}
 
     flags = df.apply(
-        lambda r: _map_row(r.get("genreid"), r.get("summary"), r.get("description")),
+        lambda r: _map_row(r.get(genre_col), r.get("description")),
         axis=1,
         result_type="expand",
     )
@@ -165,4 +192,14 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
         if col not in flags.columns:
             flags[col] = 0
 
-    return pd.concat([df[["bundle_id"]].reset_index(drop=True), flags], axis=1)
+    result = pd.concat([df[["bundle_id"]], flags], axis=1).reset_index(drop=True)
+
+    total  = len(result)
+    no_cat = int((result[CATEGORY_COLS].sum(axis=1) == 0).sum())
+    if total > 0:
+        log.info(
+            "category_mapper: done — %d assigned (%.1f%%)  %d unassigned (%.1f%%)",
+            total - no_cat, (total - no_cat) / total * 100,
+            no_cat,          no_cat          / total * 100,
+        )
+    return result

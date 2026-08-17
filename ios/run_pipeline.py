@@ -16,4 +16,6 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
-    run_batch_ios(args.input_csv, output_path=args.output, id_col=args.id_col)
+    # Bypass Athena connection for local folder CSV runs by providing dummy stats
+    dummy_stats = {"score": 0.0, "ratings_count": 0.0, "installs": 0.0}
+    run_batch_ios(args.input_csv, output_path=args.output, id_col=args.id_col, athena_stats=dummy_stats)

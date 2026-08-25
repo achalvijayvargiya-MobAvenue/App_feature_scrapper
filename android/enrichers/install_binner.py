@@ -27,14 +27,27 @@ INSTALL_COLS: list[str] = [
 ]
 
 _STRIP = re.compile(r"[,+\s]")
+_SUFFIX_MULTIPLIER = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+_SUFFIX_RE = re.compile(r"^([\d.]+)([KMB])$", re.IGNORECASE)
 
 
 def _parse_installs(series: pd.Series, fallback: pd.Series | None) -> pd.Series:
-    """Return a numeric Series of install counts."""
-    numeric = pd.to_numeric(
-        series.astype(str).str.replace(_STRIP, "", regex=True),
-        errors="coerce",
-    )
+    """
+    Return a numeric Series of install counts. Handles:
+        "1,000,000+"    (Western grouping)
+        "1,00,00,000+"  (Indian grouping)
+        "10M+", "500K+", "1.2B+"  (letter-suffix shorthand)
+    """
+    cleaned = series.astype(str).str.replace(_STRIP, "", regex=True)
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+
+    suffix_match = cleaned.str.extract(_SUFFIX_RE)
+    has_suffix = suffix_match[0].notna()
+    if has_suffix.any():
+        suffix_num = pd.to_numeric(suffix_match[0], errors="coerce")
+        multiplier = suffix_match[1].str.upper().map(_SUFFIX_MULTIPLIER)
+        numeric = numeric.where(~has_suffix, suffix_num * multiplier)
+
     if fallback is not None:
         # fill gaps from min_installs when string parse fails
         numeric = numeric.fillna(pd.to_numeric(fallback, errors="coerce"))

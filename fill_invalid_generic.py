@@ -2,7 +2,8 @@
 fill_invalid_generic.py
 ======================
 Fills missing required fields with default values so that otherwise-good
-rows aren't dropped just because scraping didn't return everything.
+
+rows aren't dropped just because Google Play didn't return everything.
 
 Static defaults:
     genreid          → "UNKNOWN"
@@ -18,6 +19,7 @@ Statistical defaults (queried live from Athena prod.app_features):
     installs         → MEDIAN for Android rows; always 0 for iOS rows
                         (os_type == "IOS"), since Apple never exposes
                         install counts.
+
 
 Derived defaults (dependency chain — each step uses the previous one's
 already-resolved value, so they stay mutually consistent):
@@ -240,6 +242,7 @@ def run(input_path: Path, output_path: Path) -> None:
     log.info("Output → %s  (%d rows)", output_path.resolve(), len(df))
 
 
+
 def fill(df: pd.DataFrame, stats: dict[str, float] | None = None) -> pd.DataFrame:
     """
     Fill missing required fields in-place with default values and add a
@@ -250,11 +253,13 @@ def fill(df: pd.DataFrame, stats: dict[str, float] | None = None) -> pd.DataFram
     invoke fill() multiple times in one run (e.g. once per batch, or across
     single-app calls in a loop) should fetch stats once up front and pass
     the same dict in each time, rather than letting each call re-query.
+
     """
     for col in FILLABLE_COLS:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(object)
+
 
     if stats is None:
         stats = _fetch_athena_stats()
@@ -279,12 +284,14 @@ def fill(df: pd.DataFrame, stats: dict[str, float] | None = None) -> pd.DataFram
                 row_defaulted = True
                 filled_count += 1
 
+
         if _is_empty(record.get("installs")):
             df.at[idx, "installs"] = (
                 str(IOS_INSTALLS_DEFAULT) if _is_ios(record) else str(stats["installs"])
             )
             row_defaulted = True
             filled_count += 1
+
 
         # Dependency chain: installs/ratings (just resolved above) → launch_date
         # → days_since_released → months_since_launch. Re-read the row so each

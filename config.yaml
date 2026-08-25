@@ -11,8 +11,10 @@ aws:
 s3:
   bucket: mobavenue-simplismart-aws-s3-apse-sg
   # Trailing slash matters — used as a prefix for listing/writing.
-  latest_prefix: rtb/data/shreyansh/app_features/latest/
-  base_prefix: rtb/data/shreyansh/app_features/
+
+
+  latest_prefix: rtb/data/ml/app_features/latest/
+  base_prefix: rtb/data/ml/app_features/
 
 athena:
   database: mobavenue_dsp          # database that owns rtb_bids
@@ -26,7 +28,7 @@ athena:
 query:
   year: 2026
   month: 7
-  days: [28, 29]         # -> day IN (13, 14)
+  days: [24, 25]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
 
 scraping:
@@ -41,6 +43,7 @@ scraping:
   # want a guaranteed number per OS regardless of how skewed the combined
   # list is toward one platform. Set to null for no per-platform cap.
   max_bundles_per_platform: 100
+
 
 output:
 

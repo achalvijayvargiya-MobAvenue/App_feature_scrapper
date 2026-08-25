@@ -42,6 +42,7 @@ scraping:
   # list is toward one platform. Set to null for no per-platform cap.
   max_bundles_per_platform: 20000
 
+
 output:
 
   # Each run writes a NEW file into the "latest" folder — nothing existing

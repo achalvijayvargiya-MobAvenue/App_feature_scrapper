@@ -11,8 +11,6 @@ aws:
 s3:
   bucket: mobavenue-simplismart-aws-s3-apse-sg
   # Trailing slash matters — used as a prefix for listing/writing.
-
-
   latest_prefix: rtb/data/ml/app_features/latest/
   base_prefix: rtb/data/ml/app_features/
 
@@ -27,8 +25,8 @@ athena:
 
 query:
   year: 2026
-  month: 7
-  days: [24, 25]         # -> day IN (13, 14)
+  month: 8
+  days: [20, 21]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
 
 scraping:
@@ -37,12 +35,12 @@ scraping:
   # Cap how many newly-discovered bundle_ids get scraped/enriched per run.
   # Applied to the COMBINED list before Android/iOS segregation.
   # Set to null for no limit (process everything the EXCEPT query returns).
-  max_bundles_per_run: 10000
+  max_bundles_per_run: 20000
   # Cap applied to EACH platform independently, after Android/iOS
   # segregation (see run_pipeline.py::_segregate_bundles). Use this when you
   # want a guaranteed number per OS regardless of how skewed the combined
   # list is toward one platform. Set to null for no per-platform cap.
-  max_bundles_per_platform: 100
+  max_bundles_per_platform: 20000
 
 
 output:

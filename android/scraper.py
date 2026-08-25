@@ -5,6 +5,7 @@ Fetches application metadata using the Google Play Store (via google_play_scrape
 """
 
 import logging
+import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -14,6 +15,15 @@ from google_play_scraper import app as gps_app
 from google_play_scraper.exceptions import NotFoundError
 
 log = logging.getLogger(__name__)
+
+# google_play_scraper calls urlopen() with no timeout of its own, so a stalled
+# connection blocks its worker thread forever (observed 2026-08-25: 2 of 10
+# ThreadPoolExecutor workers wedged on a single request for 12+ minutes,
+# stalling the whole hydrate batch since nothing else was left to schedule).
+# socket.setdefaulttimeout() only applies to sockets that don't set their own
+# timeout, so it won't affect boto3/Athena calls, which configure theirs
+# explicitly.
+socket.setdefaulttimeout(30)
 
 
 class ScraperError(Exception):

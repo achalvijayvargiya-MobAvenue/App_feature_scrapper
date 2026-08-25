@@ -73,6 +73,7 @@ WHERE year = {q['year']}
   AND day IN ({days_sql})
   AND device_id IS NOT NULL
   AND device_id NOT IN ('', 'null')
+  AND country_code = 'IND'
 
 EXCEPT
 

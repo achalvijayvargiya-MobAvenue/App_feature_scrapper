@@ -95,19 +95,44 @@ def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
             return idx, None, f"Scrape failed for {bundle_id}: {exc}"
 
     success_count = 0
+    done_count = 0
+    REQUEST_TIMEOUT_SEC = 30  # google_play_scraper uses urlopen() with no timeout of its own
+    pending = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(fetch, idx): idx for idx in targets}
-        for future in concurrent.futures.as_completed(futures):
-            idx, scraped, err = future.result()
-            if err:
-                log.warning(err)
+        pending = set(futures)
+        while pending:
+            # timeout bounds how long we wait per poll, not per-request: a
+            # request stuck in urlopen() with no library-level timeout would
+            # otherwise never appear in as_completed() at all, silently
+            # stalling the whole batch (see 2026-08-25 incident).
+            newly_done, pending = concurrent.futures.wait(
+                pending, timeout=REQUEST_TIMEOUT_SEC,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            if not newly_done:
+                still_running = [str(df.at[futures[f], "bundle_id"]).strip() for f in pending]
+                log.warning("No scrapes completed in the last %ds — %d still in flight (e.g. %s)",
+                            REQUEST_TIMEOUT_SEC, len(pending), still_running[:5])
                 continue
-            for col in REQUIRED_COLS:
-                if _is_empty(df.at[idx, col]) and not _is_empty(scraped.get(col)):
-                    df.at[idx, col] = scraped[col]
-            if _is_empty(df.at[idx, "real_installs"]) and not _is_empty(scraped.get("real_installs")):
-                df.at[idx, "real_installs"] = scraped.get("real_installs")
-            success_count += 1
+
+            for future in newly_done:
+                idx = futures[future]
+                idx, scraped, err = future.result()
+                done_count += 1
+                if err:
+                    log.warning(err)
+                    continue
+                for col in REQUIRED_COLS:
+                    if _is_empty(df.at[idx, col]) and not _is_empty(scraped.get(col)):
+                        df.at[idx, col] = scraped[col]
+                if _is_empty(df.at[idx, "real_installs"]) and not _is_empty(scraped.get("real_installs")):
+                    df.at[idx, "real_installs"] = scraped.get("real_installs")
+                success_count += 1
+
+            if done_count % 500 < len(newly_done):
+                log.info("Hydrate progress: %d/%d processed (%d fetched OK)",
+                          done_count, len(targets), success_count)
 
     log.info("Scrape hydrate complete: %d/%d rows fetched.", success_count, len(targets))
     return df

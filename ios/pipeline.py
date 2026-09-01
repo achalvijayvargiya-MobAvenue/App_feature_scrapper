@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from functools import reduce
 
 import pandas as pd
+from tqdm import tqdm
 
 import fill_invalid_generic
 from ios.constants import FINAL_COLUMNS
@@ -152,16 +153,20 @@ def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
         return
 
     records = []
+    fail_count = 0
     app_ids = df_in[id_col].dropna().unique()
-    for i, app_id in enumerate(app_ids):
-        if i > 0:
-            time.sleep(_REQUEST_INTERVAL_SECONDS)
-        app_id_str = str(app_id).strip()
-        log.info("Processing %s (%d/%d)...", app_id_str, i + 1, len(app_ids))
-        try:
-            records.append(scrape_ios_bundle(app_id_str))
-        except Exception as e:
-            log.warning("Failed to scrape %s: %s", app_id_str, e)
+    with tqdm(total=len(app_ids), desc="Scraping (App Store)", unit="app") as bar:
+        for i, app_id in enumerate(app_ids):
+            if i > 0:
+                time.sleep(_REQUEST_INTERVAL_SECONDS)
+            app_id_str = str(app_id).strip()
+            try:
+                records.append(scrape_ios_bundle(app_id_str))
+            except Exception as e:
+                fail_count += 1
+                tqdm.write(f"Failed to scrape {app_id_str}: {e}")
+            bar.set_postfix(ok=len(records), failed=fail_count)
+            bar.update(1)
 
     if not records:
         log.warning("No records were successfully scraped.")

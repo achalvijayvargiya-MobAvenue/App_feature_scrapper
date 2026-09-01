@@ -26,7 +26,7 @@ athena:
 query:
   year: 2026
   month: 8
-  days: [20, 21]         # -> day IN (13, 14)
+  days: [25, 26]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
 
 scraping:
@@ -47,5 +47,5 @@ output:
 
   # Each run writes a NEW file into the "latest" folder — nothing existing
   # there is read, merged, or overwritten. {date} is replaced with the
-  # run date (YYYYMMDD).
+  # run's date + time (YYYYMMDD_HHMMSS) so same-day reruns don't collide.
   latest_filename_pattern: "app_data_{date}.csv"

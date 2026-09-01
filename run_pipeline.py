@@ -8,12 +8,13 @@ End-to-end daily automation:
      (imp_tables.app_feature_raw_test is read directly by Athena — nothing
      is downloaded locally for this comparison).
   2. Save the new bundle_ids to
-         s3://<bucket>/<base_prefix>/<YYYYMMDD>/extracted_bundles.csv
-     (YYYYMMDD = today, always).
+         s3://<bucket>/<base_prefix>/<YYYYMMDD>/<HHMMSS>/extracted_bundles.csv
+     (YYYYMMDD = today, HHMMSS = this run's start time — every run gets its
+     own subfolder so same-day reruns never overwrite each other's files).
   3. Feed extracted_bundles.csv into both android.pipeline and ios.pipeline
      (each scrapes, validates, and enriches independently), then combine
-     the two outputs into one CSV via combine.py -> app_data_<YYYYMMDD>.csv,
-     saved under the same dated folder.
+     the two outputs into one CSV via combine.py ->
+     app_data_<YYYYMMDD>_<HHMMSS>.csv, saved under the same run subfolder.
   4. Clean/standardize that CSV and upload it as a NEW file inside the
      "latest" S3 folder. Nothing already in "latest" is read, merged, or
      overwritten — each run just adds one more file.
@@ -99,14 +100,14 @@ def step1_run_except_query(cfg: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Step 2
 # ---------------------------------------------------------------------------
-def step2_save_extracted(cfg: dict, s3, bundles_df: pd.DataFrame, workdir: Path, date_str: str) -> Path:
+def step2_save_extracted(cfg: dict, s3, bundles_df: pd.DataFrame, workdir: Path, date_str: str, run_id: str) -> Path:
     log.info(SEPARATOR)
-    log.info("STEP 2 — Save extracted_bundles.csv to dated S3 folder (%s)", date_str)
+    log.info("STEP 2 — Save extracted_bundles.csv to dated S3 folder (%s/%s)", date_str, run_id)
     log.info(SEPARATOR)
     local_path = workdir / "extracted_bundles.csv"
     bundles_df.to_csv(local_path, index=False)
     bucket = cfg["s3"]["bucket"]
-    key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/extracted_bundles.csv"
+    key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{run_id}/extracted_bundles.csv"
     upload_file(s3, local_path, bucket, key)
     return local_path
 
@@ -160,7 +161,7 @@ def _cap_bundles(csv_path: Path, limit: int | None, label: str) -> Path:
 # ---------------------------------------------------------------------------
 # Step 3
 # ---------------------------------------------------------------------------
-def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str) -> Path:
+def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str, run_id: str) -> Path:
     log.info(SEPARATOR)
     log.info("STEP 3 — Scrape / validate / enrich (Android + iOS) and combine")
     log.info(SEPARATOR)
@@ -188,6 +189,7 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
     # text field like description breaks Athena's CSV SerDe and other
     # line-based readers downstream) — clean before each upload, not just the
     # final "latest" publish in step 4.
+
     _clean_csv_in_place(android_csv)
     _clean_csv_in_place(ios_csv)
 
@@ -195,11 +197,11 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
         if invalid_csv.exists():
             _clean_csv_in_place(invalid_csv)
             bucket = cfg["s3"]["bucket"]
-            key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{invalid_csv.name}"
+            key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{run_id}/{invalid_csv.name}"
             upload_file(s3, invalid_csv, bucket, key)
             log.info("Unscrapable / invalid bundles archived to s3://%s/%s", bucket, key)
 
-    output_csv = workdir / f"app_data_{date_str}.csv"
+    output_csv = workdir / f"app_data_{date_str}_{run_id}.csv"
     combine_outputs(android_csv, ios_csv, output_csv)
 
     if not output_csv.exists():
@@ -208,7 +210,7 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
     _clean_csv_in_place(output_csv)
 
     bucket = cfg["s3"]["bucket"]
-    key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{output_csv.name}"
+    key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{run_id}/{output_csv.name}"
     upload_file(s3, output_csv, bucket, key)
     return output_csv
 
@@ -225,7 +227,7 @@ def _clean_csv_in_place(csv_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Step 4
 # ---------------------------------------------------------------------------
-def step4_clean_and_publish(cfg: dict, s3, enriched_csv: Path, workdir: Path, date_str: str) -> str:
+def step4_clean_and_publish(cfg: dict, s3, enriched_csv: Path, workdir: Path, date_str: str, run_id: str) -> str:
     """
     Clean the newly-scraped/enriched rows and upload them as a NEW file
     inside the 'latest' folder. Existing files under latest_prefix are never
@@ -239,7 +241,7 @@ def step4_clean_and_publish(cfg: dict, s3, enriched_csv: Path, workdir: Path, da
     new_df = clean_dataframe(new_df)
     log.info("Cleaned rows ready to publish: %d", len(new_df))
 
-    filename = cfg["output"]["latest_filename_pattern"].format(date=date_str)
+    filename = cfg["output"]["latest_filename_pattern"].format(date=f"{date_str}_{run_id}")
     local_out = workdir / filename
     new_df.to_csv(local_out, index=False)
 
@@ -259,10 +261,12 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    date_str = args.date or datetime.now(timezone.utc).strftime("%Y%m%d")
+    now = datetime.now(timezone.utc)
+    date_str = args.date or now.strftime("%Y%m%d")
+    run_id = now.strftime("%H%M%S")
 
     log.info(SEPARATOR)
-    log.info("RUN_PIPELINE — date=%s", date_str)
+    log.info("RUN_PIPELINE — date=%s run_id=%s", date_str, run_id)
     log.info(SEPARATOR)
 
     s3 = make_s3_client(cfg)
@@ -281,9 +285,9 @@ def main():
                       limit, len(bundles_df))
             bundles_df = bundles_df.head(limit)
 
-        extracted_local = step2_save_extracted(cfg, s3, bundles_df, workdir, date_str)
-        enriched_csv = step3_scrape_enrich(cfg, s3, extracted_local, workdir, date_str)
-        final_uri = step4_clean_and_publish(cfg, s3, enriched_csv, workdir, date_str)
+        extracted_local = step2_save_extracted(cfg, s3, bundles_df, workdir, date_str, run_id)
+        enriched_csv = step3_scrape_enrich(cfg, s3, extracted_local, workdir, date_str, run_id)
+        final_uri = step4_clean_and_publish(cfg, s3, enriched_csv, workdir, date_str, run_id)
 
     log.info(SEPARATOR)
     log.info("DONE. Published -> %s", final_uri)

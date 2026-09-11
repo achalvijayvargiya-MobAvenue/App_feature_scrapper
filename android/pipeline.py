@@ -32,7 +32,7 @@ from google_play_scraper.exceptions import NotFoundError
 
 import fill_invalid_generic
 from android.constants import FINAL_COLUMNS, PASSTHROUGH_COLS, REQUIRED_COLS
-from android.scraper import scrape_android_bundle
+from android.scraper import scrape_android_bundle, COUNTRY_TO_CODE
 from android.enrichers import (
     category_mapper,
     score_binner,
@@ -65,7 +65,7 @@ def _is_empty(val) -> bool:
     return str(val).strip() == ""
 
 
-def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
+def _hydrate_missing_required_fields(df: pd.DataFrame, country: str = "in") -> pd.DataFrame:
     """Fill missing required fields by scraping Play Store per bundle ID."""
     df = df.copy()
     for col in REQUIRED_COLS:
@@ -89,7 +89,7 @@ def _hydrate_missing_required_fields(df: pd.DataFrame) -> pd.DataFrame:
     def fetch(idx):
         bundle_id = str(df.at[idx, "bundle_id"]).strip()
         try:
-            return idx, scrape_android_bundle(bundle_id), None
+            return idx, scrape_android_bundle(bundle_id, country=country), None
         except NotFoundError:
             return idx, None, f"Bundle not found on Play Store: {bundle_id}"
         except Exception as exc:
@@ -197,7 +197,6 @@ def _merge_enrichments(parts: list[pd.DataFrame]) -> pd.DataFrame:
 
 def enrich_android_data(valid: pd.DataFrame) -> pd.DataFrame:
     valid = valid.copy()
-    valid["country_code"] = "IND"
     valid["os_type"] = "ANDROID"
     valid["default"] = valid.get("default", None)
 
@@ -222,16 +221,16 @@ def enrich_android_data(valid: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_single_android(bundle_id: str, output_path: str = "single_bundle_output_android.csv",
-                        athena_stats: dict | None = None):
+                        athena_stats: dict | None = None, country: str = "in"):
     log.info("Scraping Play Store for %s ...", bundle_id)
     try:
-        data = scrape_android_bundle(bundle_id.strip())
+        data = scrape_android_bundle(bundle_id.strip(), country=country)
         df = pd.DataFrame([data])
     except Exception as e:
         log.error("Failed to scrape %s: %s", bundle_id, e)
         return
 
-    df = _hydrate_missing_required_fields(df)
+    df = _hydrate_missing_required_fields(df, country=country)
     df = _resolve_installs(df)
     df["months_since_launch"] = _derive_months(df)
     df["os_type"] = "ANDROID"
@@ -251,9 +250,9 @@ def run_single_android(bundle_id: str, output_path: str = "single_bundle_output_
 
 def run_batch_android(input_csv: str, output_path: str, id_col: str = "bundle_id",
                        invalid_output: str = "invalid_records_android.csv",
-                       athena_stats: dict | None = None):
+                       athena_stats: dict | None = None, country: str = "in"):
     log.info(SEPARATOR)
-    log.info("ANDROID PIPELINE - Validate & Enrich")
+    log.info("ANDROID PIPELINE - Validate & Enrich (country=%s)", country)
     log.info(SEPARATOR)
 
     raw = pd.read_csv(input_csv, low_memory=False)
@@ -261,10 +260,11 @@ def run_batch_android(input_csv: str, output_path: str, id_col: str = "bundle_id
     if id_col != "bundle_id" and id_col in raw.columns:
         raw = raw.rename(columns={id_col: "bundle_id"})
 
-    raw = _hydrate_missing_required_fields(raw)
+    raw = _hydrate_missing_required_fields(raw, country=country)
     raw = _resolve_installs(raw)
     raw["months_since_launch"] = _derive_months(raw)
     raw["os_type"] = "ANDROID"
+    raw["country_code"] = COUNTRY_TO_CODE.get(country.lower(), country.upper())
     raw = fill_invalid_generic.fill(raw, stats=athena_stats)
     log.info("Loaded %d rows, %d columns.", len(raw), len(raw.columns))
 

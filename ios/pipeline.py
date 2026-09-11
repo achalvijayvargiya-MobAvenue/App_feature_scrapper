@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 import fill_invalid_generic
 from ios.constants import FINAL_COLUMNS
-from ios.scraper import scrape_ios_bundle
+from ios.scraper import scrape_ios_bundle, COUNTRY_TO_CODE
 from ios.enrichers import (
     category_mapper,
     score_binner,
@@ -117,10 +117,10 @@ def enrich_ios_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_single_ios(app_id: str, output_path: str = "single_bundle_output_ios.csv",
-                    athena_stats: dict | None = None):
+                    athena_stats: dict | None = None, country: str = "in"):
     log.info("Scraping iOS App Store for %s...", app_id)
     try:
-        data = scrape_ios_bundle(app_id)
+        data = scrape_ios_bundle(app_id, country=country)
         df = pd.DataFrame([data])
     except Exception as e:
         log.error("Failed to scrape %s: %s", app_id, e)
@@ -142,9 +142,9 @@ def run_single_ios(app_id: str, output_path: str = "single_bundle_output_ios.csv
 
 def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
                    invalid_output: str = "invalid_records_ios.csv",
-                   athena_stats: dict | None = None):
+                   athena_stats: dict | None = None, country: str = "in"):
     log.info(SEPARATOR)
-    log.info("IOS PIPELINE - Scrape & Enrich")
+    log.info("IOS PIPELINE - Scrape & Enrich (country=%s)", country)
     log.info(SEPARATOR)
 
     df_in = pd.read_csv(input_csv)
@@ -161,7 +161,7 @@ def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
                 time.sleep(_REQUEST_INTERVAL_SECONDS)
             app_id_str = str(app_id).strip()
             try:
-                records.append(scrape_ios_bundle(app_id_str))
+                records.append(scrape_ios_bundle(app_id_str, country=country))
             except Exception as e:
                 fail_count += 1
                 tqdm.write(f"Failed to scrape {app_id_str}: {e}")

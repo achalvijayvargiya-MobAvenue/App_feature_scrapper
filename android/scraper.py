@@ -45,6 +45,9 @@ def _released_to_days(released_str: Optional[str]) -> Optional[int]:
     return None
 
 
+COUNTRY_TO_CODE = {"in": "IND", "us": "USA"}
+
+
 def scrape_android_bundle(bundle_id: str, country: str = "in", lang: str = "en") -> Dict[str, Any]:
     """
     Query the Play Store for an Android app by its bundle ID.
@@ -74,7 +77,7 @@ def scrape_android_bundle(bundle_id: str, country: str = "in", lang: str = "en")
         "launch_date": data.get("released"),
         "days_since_released": _released_to_days(data.get("released")),
         "real_installs": data.get("realInstalls"),
-        "country_code": "IND",
+        "country_code": COUNTRY_TO_CODE.get(country.lower(), country.upper()),
         "os_type": "ANDROID",
         "default": None,
     }

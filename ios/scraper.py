@@ -20,6 +20,8 @@ class NotFoundError(Exception):
 class ScraperError(Exception):
     pass
 
+COUNTRY_TO_CODE = {"in": "IND", "us": "USA"}
+
 def _fetch_itunes_data(app_id: str, country: str = "in", retries: int = 3) -> Dict[str, Any]:
     """
     Fetch data from iTunes API with simple retry logic.
@@ -109,7 +111,7 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
         "offers_iap": offers_iap,
         "launch_date": _normalize_launch_date(app_info.get("releaseDate")),
         "real_installs": None,
-        "country_code": "IND",
+        "country_code": COUNTRY_TO_CODE.get(country.lower(), country.upper()),
         "os_type": "IOS",
         "default": None
     }

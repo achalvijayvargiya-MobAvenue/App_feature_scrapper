@@ -121,9 +121,43 @@ Requires the `pipeline/` package (`s3_utils.py`, `athena_utils.py`,
 `clean_output.py`) which is **not present in this checkout** — this script
 will fail to import until that package exists alongside it. Treat it as a
 reference for the intended production flow (Athena EXCEPT query → S3 →
-`orchestrate.run()` → clean/publish) rather than something runnable here.
+scrape/validate/enrich → clean/publish) rather than something runnable here.
 
 ```
 python run_pipeline.py --config config.yaml
 python run_pipeline.py --config config.yaml --date 20260714
 ```
+
+### Countries and grain
+
+`prod.app_features`'s grain is **(bundle_id, country_code)** — the same app
+can legitimately have different `score`, `content_rating`, `ratings_count`,
+and `launch_date` per country's storefront, so rows for different countries
+are never merged or deduped into one.
+
+Countries scraped per run are set in `config.yaml`'s `query.countries` (e.g.
+`[IND, USA]`). The EXCEPT query compares on `(bundle_id, country_code)`
+against `prod.app_features`, so an app already present for IND but missing
+for USA still gets pulled and scraped for USA.
+
+### Output: 4 files per run
+
+Step 3 splits the EXCEPT query's results into 4 buckets — Android/iOS ×
+each configured country — and scrapes each bucket against the matching
+storefront (`google_play_scraper`/iTunes `country` param: `IND → in`,
+`USA → us`), so per-country fields are pulled from the correct store rather
+than reused across countries.
+
+Step 4 publishes each bucket as its own new file into the `latest/` S3
+folder (nothing existing there is read, merged, or overwritten):
+
+```
+app_data_android_ind_<YYYYMMDD>_<HHMMSS>.csv
+app_data_android_usa_<YYYYMMDD>_<HHMMSS>.csv
+app_data_ios_ind_<YYYYMMDD>_<HHMMSS>.csv
+app_data_ios_usa_<YYYYMMDD>_<HHMMSS>.csv
+```
+
+`combine.py` (merging Android + iOS into one CSV) is **not** part of this
+flow anymore — merging would collapse the country dimension out of the
+grain.

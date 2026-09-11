@@ -3,24 +3,30 @@ run_pipeline.py
 ================
 End-to-end daily automation:
 
-  1. Run the EXCEPT query in Athena: bundle_ids seen in rtb_bids for the
-     configured day(s) that are NOT already in the features table
-     (imp_tables.app_feature_raw_test is read directly by Athena — nothing
-     is downloaded locally for this comparison).
-  2. Save the new bundle_ids to
+  1. Run the EXCEPT query in Athena: (bundle_id, country_code) pairs seen in
+     rtb_bids for the configured day(s) and countries (query.countries in
+     config.yaml, e.g. IND + USA) that are NOT already in the features table
+     for that same (bundle_id, country_code) pair — an app already scraped
+     for one country still gets pulled for a country it's missing.
+  2. Save the new (bundle_id, country_code) pairs to
          s3://<bucket>/<base_prefix>/<YYYYMMDD>/<HHMMSS>/extracted_bundles.csv
      (YYYYMMDD = today, HHMMSS = this run's start time — every run gets its
      own subfolder so same-day reruns never overwrite each other's files).
-  3. Feed extracted_bundles.csv into both android.pipeline and ios.pipeline
-     (each scrapes, validates, and enriches independently), then combine
-     the two outputs into one CSV via combine.py ->
-     app_data_<YYYYMMDD>_<HHMMSS>.csv, saved under the same run subfolder.
-  4. Clean/standardize that CSV and upload it as a NEW file inside the
-     "latest" S3 folder. Nothing already in "latest" is read, merged, or
-     overwritten — each run just adds one more file.
+  3. Split that list into 4 buckets (android/ios x each configured country)
+     and feed each into android.pipeline / ios.pipeline with the matching
+     store country param, so score/content_rating/ratings_count/launch_date
+     are scraped from the correct storefront per country rather than reused
+     across countries. Each bucket's enriched CSV is uploaded independently.
+  4. Clean/standardize each bucket's CSV and upload it as its own NEW file
+     inside the "latest" S3 folder (e.g. app_data_android_ind_<date>.csv,
+     app_data_android_usa_<date>.csv, app_data_ios_ind_<date>.csv,
+     app_data_ios_usa_<date>.csv). bundle_id + country_code together are the
+     table's grain, so countries are never combined/deduped into one row.
+     Nothing already in "latest" is read, merged, or overwritten — each run
+     just adds more files.
 
-Requires android/, ios/, combine.py, and pipeline/ (this file's siblings)
-to be importable — run from the App_feature_scrapper directory.
+Requires android/, ios/, and pipeline/ (this file's siblings) to be
+importable — run from the App_feature_scrapper directory.
 
 Usage:
     python run_pipeline.py --config config.yaml
@@ -47,7 +53,6 @@ from pipeline.clean_output import clean_dataframe
 import fill_invalid_generic
 from android.pipeline import run_batch_android
 from ios.pipeline import run_batch_ios
-from combine import combine as combine_outputs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,19 +71,20 @@ def load_config(path: Path) -> dict:
 def build_except_query(cfg: dict) -> str:
     q = cfg["query"]
     days_sql = ", ".join(str(d) for d in q["days"])
+    countries_sql = ", ".join(f"'{c}'" for c in q["countries"])
     return f"""
-SELECT DISTINCT LOWER(TRIM(pub_bundle)) AS bundle_id
+SELECT DISTINCT LOWER(TRIM(pub_bundle)) AS bundle_id, country_code
 FROM {cfg['athena']['database']}.{q['rtb_bids_table']}
 WHERE year = {q['year']}
   AND month = {q['month']}
   AND day IN ({days_sql})
   AND device_id IS NOT NULL
   AND device_id NOT IN ('', 'null')
-  AND country_code = 'IND'
+  AND country_code IN ({countries_sql})
 
 EXCEPT
 
-SELECT DISTINCT LOWER(TRIM(bundle_id)) AS bundle_id
+SELECT DISTINCT LOWER(TRIM(bundle_id)) AS bundle_id, country_code
 FROM {cfg['athena']['existing_features_table']}
 """.strip()
 
@@ -112,10 +118,15 @@ def step2_save_extracted(cfg: dict, s3, bundles_df: pd.DataFrame, workdir: Path,
     return local_path
 
 
-def _segregate_bundles(extracted_csv: Path, workdir: Path, id_col: str = "bundle_id") -> tuple[Path, Path]:
+# rtb_bids country_code -> scraper `country` param (google_play_scraper / iTunes lookup).
+COUNTRY_CODE_TO_PARAM = {"IND": "in", "USA": "us"}
+
+
+def _segregate_bundles(extracted_csv: Path, workdir: Path, countries: list[str],
+                        id_col: str = "bundle_id") -> dict[tuple[str, str], Path]:
     """
-    Split a combined bundle_id list into Android and iOS candidate files
-    before either pipeline scrapes anything.
+    Split a combined (bundle_id, country_code) list into one candidate file
+    per (platform, country) pair before any pipeline scrapes anything.
 
     Apple App Store IDs are purely numeric (e.g. "310633997"); Play Store
     bundle IDs and iOS reverse-domain bundle IDs (e.g. "com.whatsapp",
@@ -125,9 +136,13 @@ def _segregate_bundles(extracted_csv: Path, workdir: Path, id_col: str = "bundle
     in practice, so this covers the real split without throwing the whole
     combined list at both APIs (Apple's ~20 req/min limit makes that
     especially wasteful when iOS is the minority of traffic).
+
+    Returns {(platform, country_code): path}, e.g.
+    {("android", "IND"): ..., ("android", "USA"): ..., ("ios", "IND"): ..., ("ios", "USA"): ...}
     """
     df = pd.read_csv(extracted_csv, low_memory=False)
     df.columns = [c.lower() for c in df.columns]
+    df["country_code"] = df["country_code"].astype(str).str.upper()
 
     # Reindex back to df's full index so rows with a null bundle_id (dropped
     # by dropna()) don't shrink the boolean mask relative to df — those rows
@@ -136,13 +151,17 @@ def _segregate_bundles(extracted_csv: Path, workdir: Path, id_col: str = "bundle
     ids = df[id_col].dropna().astype(str).str.strip()
     is_ios = ids.str.isdigit().reindex(df.index, fill_value=False)
 
-    android_path = workdir / "extracted_bundles_android.csv"
-    ios_path = workdir / "extracted_bundles_ios.csv"
-    df.loc[~is_ios].to_csv(android_path, index=False)
-    df.loc[is_ios].to_csv(ios_path, index=False)
+    paths: dict[tuple[str, str], Path] = {}
+    for platform, platform_mask in (("android", ~is_ios), ("ios", is_ios)):
+        for country in countries:
+            mask = platform_mask & (df["country_code"] == country)
+            subset = df.loc[mask]
+            path = workdir / f"extracted_bundles_{platform}_{country.lower()}.csv"
+            subset.to_csv(path, index=False)
+            paths[(platform, country)] = path
+            log.info("Segregated bundle_ids — %s/%s: %d", platform, country, len(subset))
 
-    log.info("Segregated bundle_ids — android: %d  ios: %d", int((~is_ios).sum()), int(is_ios.sum()))
-    return android_path, ios_path
+    return paths
 
 
 def _cap_bundles(csv_path: Path, limit: int | None, label: str) -> Path:
@@ -161,39 +180,44 @@ def _cap_bundles(csv_path: Path, limit: int | None, label: str) -> Path:
 # ---------------------------------------------------------------------------
 # Step 3
 # ---------------------------------------------------------------------------
-def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str, run_id: str) -> Path:
+def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str, run_id: str) -> dict[tuple[str, str], Path]:
+    """
+    Scrape / validate / enrich each (platform, country) bucket independently
+    and upload its enriched CSV + invalid-records CSV to the dated run
+    folder. Returns {(platform, country): enriched_csv_path}.
+    """
     log.info(SEPARATOR)
-    log.info("STEP 3 — Scrape / validate / enrich (Android + iOS) and combine")
+    log.info("STEP 3 — Scrape / validate / enrich (Android + iOS) x (IND + USA)")
     log.info(SEPARATOR)
 
-    android_input, ios_input = _segregate_bundles(extracted_local, workdir)
+    countries = cfg["query"]["countries"]
+    segregated = _segregate_bundles(extracted_local, workdir, countries)
 
     per_platform_limit = cfg["scraping"].get("max_bundles_per_platform")
-    android_input = _cap_bundles(android_input, per_platform_limit, "android")
-    ios_input = _cap_bundles(ios_input, per_platform_limit, "ios")
-
-    android_csv = workdir / "android_output.csv"
-    ios_csv = workdir / "ios_output.csv"
-    android_invalid = workdir / "android_invalid.csv"
-    ios_invalid = workdir / "ios_invalid.csv"
+    for key, path in segregated.items():
+        platform, _ = key
+        segregated[key] = _cap_bundles(path, per_platform_limit, f"{platform}/{key[1]}")
 
     log.info("Fetching Athena fill-default stats (score/ratings_count/installs MODE-MEDIAN) once for this run ...")
     athena_stats = fill_invalid_generic._fetch_athena_stats()
 
-    run_batch_android(str(android_input), str(android_csv), invalid_output=str(android_invalid),
-                       athena_stats=athena_stats)
-    run_batch_ios(str(ios_input), str(ios_csv), invalid_output=str(ios_invalid),
-                  athena_stats=athena_stats)
+    runners = {"android": run_batch_android, "ios": run_batch_ios}
+    enriched_paths: dict[tuple[str, str], Path] = {}
 
-    # Every CSV that reaches S3 must be newline-safe (embedded \n/\r inside a
-    # text field like description breaks Athena's CSV SerDe and other
-    # line-based readers downstream) — clean before each upload, not just the
-    # final "latest" publish in step 4.
+    for (platform, country), input_path in segregated.items():
+        country_param = COUNTRY_CODE_TO_PARAM.get(country, country.lower())
+        label = f"{platform}_{country.lower()}"
+        output_csv = workdir / f"{label}_output.csv"
+        invalid_csv = workdir / f"{label}_invalid.csv"
 
-    _clean_csv_in_place(android_csv)
-    _clean_csv_in_place(ios_csv)
+        runners[platform](str(input_path), str(output_csv), invalid_output=str(invalid_csv),
+                           athena_stats=athena_stats, country=country_param)
 
-    for invalid_csv in (android_invalid, ios_invalid):
+        # Every CSV that reaches S3 must be newline-safe (embedded \n/\r inside
+        # a text field like description breaks Athena's CSV SerDe and other
+        # line-based readers downstream) — clean before each upload, not just
+        # the final "latest" publish in step 4.
+        _clean_csv_in_place(output_csv)
         if invalid_csv.exists():
             _clean_csv_in_place(invalid_csv)
             bucket = cfg["s3"]["bucket"]
@@ -201,18 +225,15 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
             upload_file(s3, invalid_csv, bucket, key)
             log.info("Unscrapable / invalid bundles archived to s3://%s/%s", bucket, key)
 
-    output_csv = workdir / f"app_data_{date_str}_{run_id}.csv"
-    combine_outputs(android_csv, ios_csv, output_csv)
+        if output_csv.exists():
+            bucket = cfg["s3"]["bucket"]
+            key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{run_id}/{output_csv.name}"
+            upload_file(s3, output_csv, bucket, key)
+            enriched_paths[(platform, country)] = output_csv
+        else:
+            log.warning("No output produced for %s/%s — nothing to publish for this bucket.", platform, country)
 
-    if not output_csv.exists():
-        raise RuntimeError("combine() produced no output — nothing to publish.")
-
-    _clean_csv_in_place(output_csv)
-
-    bucket = cfg["s3"]["bucket"]
-    key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{run_id}/{output_csv.name}"
-    upload_file(s3, output_csv, bucket, key)
-    return output_csv
+    return enriched_paths
 
 
 def _clean_csv_in_place(csv_path: Path) -> None:
@@ -227,27 +248,35 @@ def _clean_csv_in_place(csv_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Step 4
 # ---------------------------------------------------------------------------
-def step4_clean_and_publish(cfg: dict, s3, enriched_csv: Path, workdir: Path, date_str: str, run_id: str) -> str:
+def step4_clean_and_publish(cfg: dict, s3, enriched_paths: dict[tuple[str, str], Path],
+                             workdir: Path, date_str: str, run_id: str) -> list[str]:
     """
-    Clean the newly-scraped/enriched rows and upload them as a NEW file
-    inside the 'latest' folder. Existing files under latest_prefix are never
-    read, merged, or overwritten — this only adds a file.
+    Clean each (platform, country) bucket's newly-scraped/enriched rows and
+    upload each as its own NEW file inside the 'latest' folder — one file per
+    platform/country combination (e.g. app_data_android_ind_<date>.csv),
+    since bundle_id + country_code together are the table's grain and must
+    not be collapsed into one row. Existing files under latest_prefix are
+    never read, merged, or overwritten — this only adds files.
     """
     log.info(SEPARATOR)
-    log.info("STEP 4 — Clean and publish as a new file in 'latest' (append-only)")
+    log.info("STEP 4 — Clean and publish 4 new files in 'latest' (append-only)")
     log.info(SEPARATOR)
 
-    new_df = pd.read_csv(enriched_csv, low_memory=False)
-    new_df = clean_dataframe(new_df)
-    log.info("Cleaned rows ready to publish: %d", len(new_df))
+    published_uris = []
+    for (platform, country), enriched_csv in enriched_paths.items():
+        new_df = pd.read_csv(enriched_csv, low_memory=False)
+        new_df = clean_dataframe(new_df)
+        log.info("Cleaned rows ready to publish for %s/%s: %d", platform, country, len(new_df))
 
-    filename = cfg["output"]["latest_filename_pattern"].format(date=f"{date_str}_{run_id}")
-    local_out = workdir / filename
-    new_df.to_csv(local_out, index=False)
+        filename = f"app_data_{platform}_{country.lower()}_{date_str}_{run_id}.csv"
+        local_out = workdir / filename
+        new_df.to_csv(local_out, index=False)
 
-    bucket = cfg["s3"]["bucket"]
-    key = f"{cfg['s3']['latest_prefix'].rstrip('/')}/{filename}"
-    return upload_file(s3, local_out, bucket, key)
+        bucket = cfg["s3"]["bucket"]
+        key = f"{cfg['s3']['latest_prefix'].rstrip('/')}/{filename}"
+        published_uris.append(upload_file(s3, local_out, bucket, key))
+
+    return published_uris
 
 
 # ---------------------------------------------------------------------------
@@ -286,11 +315,16 @@ def main():
             bundles_df = bundles_df.head(limit)
 
         extracted_local = step2_save_extracted(cfg, s3, bundles_df, workdir, date_str, run_id)
-        enriched_csv = step3_scrape_enrich(cfg, s3, extracted_local, workdir, date_str, run_id)
-        final_uri = step4_clean_and_publish(cfg, s3, enriched_csv, workdir, date_str, run_id)
+        enriched_paths = step3_scrape_enrich(cfg, s3, extracted_local, workdir, date_str, run_id)
+        if not enriched_paths:
+            log.info("No buckets produced output — nothing to publish. Exiting.")
+            return
+        final_uris = step4_clean_and_publish(cfg, s3, enriched_paths, workdir, date_str, run_id)
 
     log.info(SEPARATOR)
-    log.info("DONE. Published -> %s", final_uri)
+    log.info("DONE. Published:")
+    for uri in final_uris:
+        log.info("  -> %s", uri)
     log.info(SEPARATOR)
 
 

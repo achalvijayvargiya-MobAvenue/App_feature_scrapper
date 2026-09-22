@@ -57,14 +57,17 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Columns filled with a fixed static default
 # ---------------------------------------------------------------------------
-STATIC_DEFAULTS: dict[str, str] = {
-    "genreid": "UNKNOWN",
-    "content_rating": "Rated for 3+",
-    "developerid": "UNKNOWN",
-    "developer": "UNKNOWN",
-    "free": "false",
-    "offers_iap": "false",
-}
+def get_static_defaults(is_ios: bool) -> dict[str, str]:
+    return {
+        "genreid": "UNKNOWN",
+        "content_rating": "4+" if is_ios else "Rated for 3+",
+        "developerid": "UNKNOWN",
+        "developer": "UNKNOWN",
+        "free": "false",
+        "offers_iap": "false",
+    }
+
+STATIC_DEFAULT_KEYS = ["genreid", "content_rating", "developerid", "developer", "free", "offers_iap"]
 
 # ---------------------------------------------------------------------------
 # Columns filled with a statistic (MODE / MEDIAN) queried from Athena.
@@ -76,7 +79,7 @@ STAT_DEFAULT_COLS = ["score", "ratings_count"]
 IOS_INSTALLS_DEFAULT = 0
 
 # Columns considered when deciding whether a row gets default=True
-DEFAULTABLE_COLS = list(STATIC_DEFAULTS) + STAT_DEFAULT_COLS + ["installs"]
+DEFAULTABLE_COLS = STATIC_DEFAULT_KEYS + STAT_DEFAULT_COLS + ["installs"]
 
 # Derived columns, filled in dependency order (each depends on the previous)
 DERIVED_COLS = ["launch_date", "days_since_released", "months_since_launch"]
@@ -92,39 +95,51 @@ _SUFFIX_RE = re.compile(r"^([\d.]+)([KMB])$", re.IGNORECASE)
 ATHENA_S3_STAGING_DIR = "s3://mobavenue-simplismart-aws-s3-apse-sg/rtb/data/shabbir/athena_results/"
 
 ATHENA_STATS_QUERY = """
-SELECT
-    APPROX_PERCENTILE(installs, 0.5)                                   AS installs_median,
-    ARBITRARY(score_mode.score)                                        AS score_mode,
-    ARBITRARY(ratings_mode.ratings_count)                              AS ratings_count_mode
-FROM prod.app_features
-CROSS JOIN (
-    SELECT score
+WITH installs_median AS (
+    SELECT UPPER(os_type) as os, UPPER(country_code) as cc, APPROX_PERCENTILE(installs, 0.5) as installs_median
+    FROM prod.app_features
+    GROUP BY 1, 2
+),
+score_counts AS (
+    SELECT UPPER(os_type) as os, UPPER(country_code) as cc, score, COUNT(*) as cnt
     FROM prod.app_features
     WHERE score IS NOT NULL
-    GROUP BY score
-    ORDER BY COUNT(*) DESC
-    LIMIT 1
-) AS score_mode
-CROSS JOIN (
-    SELECT ratings_count
+    GROUP BY 1, 2, 3
+),
+score_mode AS (
+    SELECT os, cc, score as score_mode
+    FROM (SELECT os, cc, score, ROW_NUMBER() OVER(PARTITION BY os, cc ORDER BY cnt DESC) as rn FROM score_counts)
+    WHERE rn = 1
+),
+ratings_counts AS (
+    SELECT UPPER(os_type) as os, UPPER(country_code) as cc, ratings_count, COUNT(*) as cnt
     FROM prod.app_features
     WHERE ratings_count IS NOT NULL
-    GROUP BY ratings_count
-    ORDER BY COUNT(*) DESC
-    LIMIT 1
-) AS ratings_mode
+    GROUP BY 1, 2, 3
+),
+ratings_mode AS (
+    SELECT os, cc, ratings_count as ratings_count_mode
+    FROM (SELECT os, cc, ratings_count, ROW_NUMBER() OVER(PARTITION BY os, cc ORDER BY cnt DESC) as rn FROM ratings_counts)
+    WHERE rn = 1
+)
+SELECT 
+    COALESCE(i.os, s.os, r.os) as os,
+    COALESCE(i.cc, s.cc, r.cc) as cc,
+    i.installs_median,
+    s.score_mode,
+    r.ratings_count_mode
+FROM installs_median i
+FULL OUTER JOIN score_mode s ON i.os = s.os AND i.cc = s.cc
+FULL OUTER JOIN ratings_mode r ON COALESCE(i.os, s.os) = r.os AND COALESCE(i.cc, s.cc) = r.cc
 """.strip()
 
 
-def _fetch_athena_stats() -> dict[str, float]:
+def _fetch_athena_stats() -> dict[tuple[str, str], dict[str, float]]:
     """
     Query prod.app_features via Athena for the MODE of score/ratings_count
-    and the MEDIAN of installs (installs MEDIAN is only used for Android
-    rows — iOS rows default installs to 0 regardless of this value).
+    and the MEDIAN of installs, grouped by os_type and country_code.
 
-    Credentials are resolved via the standard AWS credential chain (same as
-    the AWS CLI): environment variables, ~/.aws/credentials, SSO, or an IAM
-    role — whichever is active. No explicit access key/secret is passed.
+    Credentials are resolved via the standard AWS credential chain.
     """
     from pyathena import connect
     from pyathena.pandas.cursor import PandasCursor
@@ -137,17 +152,22 @@ def _fetch_athena_stats() -> dict[str, float]:
     )
     cursor = conn.cursor()
     df = cursor.execute(ATHENA_STATS_QUERY).as_pandas()
-    row = df.iloc[0]
+    
+    stats_dict = {}
+    for _, row in df.iterrows():
+        os_val = str(row["os"]).strip().upper()
+        cc_val = str(row["cc"]).strip().upper()
+        stats_dict[(os_val, cc_val)] = {
+            "score": row["score_mode"],
+            "ratings_count": row["ratings_count_mode"],
+            "installs": row["installs_median"],
+        }
+        log.info(
+            "Athena stats [%s/%s] — score=%s  ratings=%s  installs=%s",
+            os_val, cc_val, row["score_mode"], row["ratings_count_mode"], row["installs_median"]
+        )
 
-    log.info(
-        "Athena stats — score_mode=%s  ratings_count_mode=%s  installs_median=%s",
-        row["score_mode"], row["ratings_count_mode"], row["installs_median"],
-    )
-    return {
-        "score": row["score_mode"],
-        "ratings_count": row["ratings_count_mode"],
-        "installs": row["installs_median"],
-    }
+    return stats_dict
 
 
 def _parse_install_value(s: str) -> float | None:
@@ -243,7 +263,7 @@ def run(input_path: Path, output_path: Path) -> None:
 
 
 
-def fill(df: pd.DataFrame, stats: dict[str, float] | None = None) -> pd.DataFrame:
+def fill(df: pd.DataFrame, stats: dict[tuple[str, str], dict[str, float]] | None = None) -> pd.DataFrame:
     """
     Fill missing required fields in-place with default values and add a
     row-level ``default`` boolean column. Returns the same DataFrame.
@@ -267,12 +287,22 @@ def fill(df: pd.DataFrame, stats: dict[str, float] | None = None) -> pd.DataFram
     total = len(df)
     defaulted_mask = pd.Series(False, index=df.index)
     filled_count = 0
+    
+    # Fallback to the first available stats if a specific (OS, CC) combination is completely missing in DB
+    fallback_stats = next(iter(stats.values())) if stats else {"score": 0.0, "ratings_count": 0.0, "installs": 0.0}
 
     for idx in df.index:
         record = df.loc[idx].to_dict()
         row_defaulted = False
+        
+        is_ios = _is_ios(record)
+        os_val = str(record.get("os_type", "ANDROID")).strip().upper()
+        cc_val = str(record.get("country_code", "USA")).strip().upper()
+        
+        row_stats = stats.get((os_val, cc_val), fallback_stats)
+        static_defaults = get_static_defaults(is_ios)
 
-        for col, default_val in STATIC_DEFAULTS.items():
+        for col, default_val in static_defaults.items():
             if _is_empty(record.get(col)):
                 df.at[idx, col] = default_val
                 row_defaulted = True
@@ -280,14 +310,14 @@ def fill(df: pd.DataFrame, stats: dict[str, float] | None = None) -> pd.DataFram
 
         for col in STAT_DEFAULT_COLS:
             if _is_empty(record.get(col)):
-                df.at[idx, col] = str(stats[col])
+                df.at[idx, col] = str(row_stats.get(col, 0.0))
                 row_defaulted = True
                 filled_count += 1
 
 
         if _is_empty(record.get("installs")):
             df.at[idx, "installs"] = (
-                str(IOS_INSTALLS_DEFAULT) if _is_ios(record) else str(stats["installs"])
+                str(IOS_INSTALLS_DEFAULT) if is_ios else str(row_stats.get("installs", 0.0))
             )
             row_defaulted = True
             filled_count += 1

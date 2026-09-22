@@ -17,25 +17,39 @@ log = logging.getLogger(__name__)
 # Keyed by genre name (not numeric ID) since primaryGenreName is what the
 # scraper now stores in the genreid column. Names below are Apple's exact
 # genre labels as returned by the iTunes Lookup API.
+SPECIFIC_GAMING_CATEGORIES = {
+    "is_gaming_action_game", "is_arcade_game", "is_board_game", 
+    "is_real_money_card_and_casino_game", "is_trivia_and_puzzle_game", 
+    "is_racing_game", "is_simulation_and_role_playing_game", 
+    "is_strategy_game", "is_word_game", "is_sports_game"
+}
+
+
 GENRE_MAP: dict[str, list[str]] = {
     # Games (top-level + subgenres)
-    #"Games":               ["is_gaming_action_game"], # Base generic fallback, though usually games have subgenres
+    # Generic fallback for apps with no more specific game subgenre. Only
+    # applied when description phrases (Phase 2b) find nothing more
+    # specific — see _map_row() — so a shooter/puzzle/etc. game isn't
+    # double-tagged as casual just because Apple returned the bare "Games"
+    # genre instead of a subgenre.
+    "Games":               ["is_casual_game"],
     "Action":              ["is_gaming_action_game"],
     "Adventure":           ["is_gaming_action_game"],
     "Arcade":              ["is_arcade_game"],
     "Board":                ["is_board_game"],
     "Card":                 ["is_real_money_card_and_casino_game"],
     "Casino":               ["is_real_money_card_and_casino_game"],
-    "Educational":          ["is_education"],
     "Family":               ["is_casual_game"],
     "Puzzle":               ["is_trivia_and_puzzle_game"],
     "Racing":               ["is_racing_game"],
     "Role Playing":         ["is_simulation_and_role_playing_game"],
+    "Roleplaying":          ["is_simulation_and_role_playing_game"],
     "Simulation":           ["is_simulation_and_role_playing_game"],
     "Strategy":             ["is_strategy_game"],
     "Trivia":               ["is_trivia_and_puzzle_game"],
     "Word":                 ["is_word_game"],
     "Casual":               ["is_casual_game"],
+    "Sports":               ["is_sports_game"],
 
     # Apps
     "Finance":              ["is_finance"],
@@ -43,6 +57,7 @@ GENRE_MAP: dict[str, list[str]] = {
     "Entertainment":        ["is_entertainment"],
     "Social Networking":    ["is_social"],
     "Education":            ["is_education"],
+    "Educational":          ["is_education"],
     "Utilities":            ["is_utility"],
     "Health & Fitness":     ["is_health"],
     "Travel":               ["is_travel"],
@@ -50,7 +65,6 @@ GENRE_MAP: dict[str, list[str]] = {
     "Food & Drink":         ["is_food_drink"],
     "Business":             ["is_utility"],
     "Weather":              ["is_utility"],
-    "Sports":               ["is_sports_game"],
     "Reference":            ["is_utility"],
     "Productivity":         ["is_utility"],
     "Photo & Video":        ["is_utility"],
@@ -92,11 +106,11 @@ DESCRIPTION_PHRASE_MAP = {
     "is_gaming_action_game": ["action game", "shooter game", "fps game", "battle royale", "fighting game", "adventure game", "combat game", "multiplayer shooter", "first person shooter"],
     "is_real_money_card_and_casino_game": ["play rummy", "play poker", "teen patti", "real money games", "win real cash", "cash games", "online casino", "slot games", "card games for money", "betting app"],
     "is_word_game": ["word game", "word puzzle", "scrabble", "crossword puzzle", "word search", "spelling game", "vocabulary game", "word challenge", "guess the word"],
-    "is_trivia_and_puzzle_game": ["trivia game", "puzzle game", "brain teaser", "quiz game", "match 3 game", "sudoku", "word puzzle", "trivia questions", "puzzle levels"],
+    "is_trivia_and_puzzle_game": ["trivia game", "puzzle game", "brain teaser", "quiz game", "match 3 game", "sudoku", "word puzzle", "trivia questions", "puzzle levels", "tile match", "jigsaw puzzle", "hidden object", "solitaire", "card game", "hidden objects", "spider solitaire", "classic solitaire", "jigsaw puzzles", "klondike solitaire", "tile matching", "solitaire game", "solitaire classic", "matching game", "match three", "puzzle solving", "solve puzzles"],
     "is_strategy_game": ["strategy game", "tactical game", "chess game", "war strategy", "tower defense", "empire building", "resource management", "turn based strategy"],
     "is_sports_game": ["sports game", "cricket game", "football game", "sports management", "fifa", "cricket manager", "sports simulation", "athletic game"],
     "is_simulation_and_role_playing_game": ["role playing game", "rpg game", "simulation game", "farm simulator", "tycoon game", "idle game", "character customization", "quest game", "mmorpg"],
-    "is_racing_game": ["racing game", "car racing", "driving game", "motorsport game", "kart racing", "endless racing"],
+    "is_racing_game": ["racing game", "car racing", "driving game", "motorsport game", "kart racing", "endless racing", "car driving", "driving simulator"],
     "is_casual_game": ["casual game", "relaxing game", "simple gameplay", "tap to play", "endless runner", "hyper casual", "easy to play", "pick up and play"],
     "is_board_game": ["board game", "play ludo", "play carrom", "chess game", "board games", "tabletop game", "play monopoly"],
     "is_arcade_game": ["arcade game", "retro game", "classic arcade", "endless runner", "high score", "arcade style"],
@@ -119,6 +133,8 @@ def phase1_genre(genres_val: Any) -> set[str]:
                 genres_list = ast.literal_eval(val)
             except Exception:
                 genres_list = [val] # Fallback
+        elif '_' in val:
+            genres_list = [g.strip() for g in val.split('_')]
         elif ',' in val:
             genres_list = [g.strip() for g in val.split(',')]
         else:
@@ -180,7 +196,35 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     def _map_row(genre_val: Any, description: Any) -> dict[str, int]:
-        combined = phase1_genre(genre_val) | phase2b_description(description)
+        genre_categories = phase1_genre(genre_val)
+        desc_categories = phase2b_description(description)
+
+        combined = genre_categories | desc_categories
+
+        raw_genres_lower = str(genre_val).lower() if pd.notna(genre_val) else ""
+        if '_' in raw_genres_lower:
+            genres_list = [g.strip() for g in raw_genres_lower.split('_')]
+        elif ',' in raw_genres_lower:
+            genres_list = [g.strip() for g in raw_genres_lower.split(',')]
+        else:
+            genres_list = [raw_genres_lower.strip()]
+
+        has_generic_games = "games" in genres_list
+        has_specific_casual = "casual" in genres_list or "family" in genres_list
+        is_generic_games_fallback = has_generic_games and not has_specific_casual
+
+        # If it was assigned is_casual_game via the generic fallback, but we found OTHER specific categories...
+        if is_generic_games_fallback and "is_casual_game" in combined:
+            # We want to keep is_casual_game if the description EXPLICITLY triggered it
+            desc_triggered_casual = "is_casual_game" in desc_categories
+            
+            # Check if we successfully mapped it to any OTHER specific gaming category
+            has_specific_gaming_category = bool(combined & SPECIFIC_GAMING_CATEGORIES)
+            
+            # ONLY strip the casual game tag if we found a better gaming tag
+            if has_specific_gaming_category and not desc_triggered_casual:
+                combined.remove("is_casual_game")
+
         return {col: int(col in combined) for col in CATEGORY_COLS}
 
     flags = df.apply(

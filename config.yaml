@@ -22,30 +22,35 @@ athena:
   # Athena needs somewhere to write query results/metadata. This is NOT the
   # same as your data bucket above — point it at your Athena results bucket.
   output_location: s3://mobavenue-simplismart-aws-s3-apse-sg/athena-query-results/
-  # The "already have features for" table on the right side of EXCEPT.
-  existing_features_table: prod.app_features
+  # The "already have features for" tables on the right side of EXCEPT.
+  existing_features_tables:
+    - prod.app_features
+    - shreyansh.app_features
 
 query:
   year: 2026
   month: 9
-  days: [10]         # -> day IN (13, 14)
+  days: [19,20]         # -> day IN (13, 14)
   rtb_bids_table: rtb_bids   # lives inside athena.database
   # rtb_bids country_code values to pull. Each maps to a Play
   # Store / App Store country param via android/ios scraper's COUNTRY_TO_CODE
   # (IND -> in, USA -> us).
-  countries: [IND, USA]
+  countries: [USA]
 
 scraping:
   lang: en
+  # Temporarily set to false so apps with missing data are dropped, rather than defaulted (since USA has no historical data for stats yet)
+  allow_defaults: false
+
   # Cap how many newly-discovered bundle_ids get scraped/enriched per run.
   # Applied to the COMBINED list before Android/iOS segregation.
   # Set to null for no limit (process everything the EXCEPT query returns).
-  max_bundles_per_run: 10000
+  max_bundles_per_run: 5000
   # Cap applied to EACH platform independently, after Android/iOS
   # segregation (see run_pipeline.py::_segregate_bundles). Use this when you
   # want a guaranteed number per OS regardless of how skewed the combined
   # list is toward one platform. Set to null for no per-platform cap.
-  max_bundles_per_platform: 500
+  max_bundles_per_platform: 1000
 
 
 output:

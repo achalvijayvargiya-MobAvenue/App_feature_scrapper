@@ -250,7 +250,8 @@ def run_single_android(bundle_id: str, output_path: str = "single_bundle_output_
 
 def run_batch_android(input_csv: str, output_path: str, id_col: str = "bundle_id",
                        invalid_output: str = "invalid_records_android.csv",
-                       athena_stats: dict | None = None, country: str = "in"):
+                       athena_stats: dict | None = None, country: str = "in",
+                       allow_defaults: bool = True):
     log.info(SEPARATOR)
     log.info("ANDROID PIPELINE - Validate & Enrich (country=%s)", country)
     log.info(SEPARATOR)
@@ -265,7 +266,11 @@ def run_batch_android(input_csv: str, output_path: str, id_col: str = "bundle_id
     raw["months_since_launch"] = _derive_months(raw)
     raw["os_type"] = "ANDROID"
     raw["country_code"] = COUNTRY_TO_CODE.get(country.lower(), country.upper())
-    raw = fill_invalid_generic.fill(raw, stats=athena_stats)
+    
+    if allow_defaults:
+        raw = fill_invalid_generic.fill(raw, stats=athena_stats)
+    else:
+        raw["default"] = False
     log.info("Loaded %d rows, %d columns.", len(raw), len(raw.columns))
 
     valid, dropped = _filter_invalid(raw)

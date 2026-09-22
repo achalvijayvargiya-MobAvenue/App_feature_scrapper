@@ -100,7 +100,7 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
         # iTunes API has no subtitle/summary field on this endpoint. "Not Available" is
         # used instead of "NA"/"N/A" because pandas treats those as null on CSV re-read.
         "summary": "Not Available",
-        "genreid": app_info.get("primaryGenreName"),
+        "genreid": "_".join(sorted(set(app_info.get("genres", [])))) if app_info.get("genres") else app_info.get("primaryGenreName"),
         "content_rating": app_info.get("trackContentRating") or app_info.get("contentAdvisoryRating"),
         "score": app_info.get("averageUserRating"),
         "ratings_count": app_info.get("userRatingCount"),

@@ -142,7 +142,8 @@ def run_single_ios(app_id: str, output_path: str = "single_bundle_output_ios.csv
 
 def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
                    invalid_output: str = "invalid_records_ios.csv",
-                   athena_stats: dict | None = None, country: str = "in"):
+                   athena_stats: dict | None = None, country: str = "in",
+                   allow_defaults: bool = True):
     log.info(SEPARATOR)
     log.info("IOS PIPELINE - Scrape & Enrich (country=%s)", country)
     log.info(SEPARATOR)
@@ -173,7 +174,11 @@ def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
         return
 
     df_raw = pd.DataFrame(records)
-    df_raw = fill_invalid_generic.fill(df_raw, stats=athena_stats)
+    
+    if allow_defaults:
+        df_raw = fill_invalid_generic.fill(df_raw, stats=athena_stats)
+    else:
+        df_raw["default"] = False
     valid, dropped = _filter_invalid(df_raw)
     log.info("Valid: %d  Invalid: %d", len(valid), len(dropped))
 

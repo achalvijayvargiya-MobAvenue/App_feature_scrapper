@@ -72,6 +72,25 @@ def build_except_query(cfg: dict) -> str:
     q = cfg["query"]
     days_sql = ", ".join(str(d) for d in q["days"])
     countries_sql = ", ".join(f"'{c}'" for c in q["countries"])
+    
+    # Read tables; allow either a string or a list of strings for backwards compatibility
+    existing_tables = cfg['athena'].get('existing_features_tables')
+    if not existing_tables:
+        existing_tables = [cfg['athena'].get('existing_features_table', 'prod.app_features')]
+    elif isinstance(existing_tables, str):
+        existing_tables = [existing_tables]
+        
+    except_blocks = []
+    for table in existing_tables:
+        except_blocks.append(f"""
+EXCEPT
+
+SELECT DISTINCT LOWER(TRIM(bundle_id)) AS bundle_id, country_code
+FROM {table}
+""".strip())
+        
+    except_sql = "\n\n".join(except_blocks)
+
     return f"""
 SELECT DISTINCT LOWER(TRIM(pub_bundle)) AS bundle_id, country_code
 FROM {cfg['athena']['database']}.{q['rtb_bids_table']}
@@ -82,10 +101,7 @@ WHERE year = {q['year']}
   AND device_id NOT IN ('', 'null')
   AND country_code IN ({countries_sql})
 
-EXCEPT
-
-SELECT DISTINCT LOWER(TRIM(bundle_id)) AS bundle_id, country_code
-FROM {cfg['athena']['existing_features_table']}
+{except_sql}
 """.strip()
 
 
@@ -209,9 +225,10 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
         label = f"{platform}_{country.lower()}"
         output_csv = workdir / f"{label}_output.csv"
         invalid_csv = workdir / f"{label}_invalid.csv"
+        allow_defaults = cfg.get("scraping", {}).get("allow_defaults", True)
 
         runners[platform](str(input_path), str(output_csv), invalid_output=str(invalid_csv),
-                           athena_stats=athena_stats, country=country_param)
+                           athena_stats=athena_stats, country=country_param, allow_defaults=allow_defaults)
 
         # Every CSV that reaches S3 must be newline-safe (embedded \n/\r inside
         # a text field like description breaks Athena's CSV SerDe and other
@@ -251,32 +268,38 @@ def _clean_csv_in_place(csv_path: Path) -> None:
 def step4_clean_and_publish(cfg: dict, s3, enriched_paths: dict[tuple[str, str], Path],
                              workdir: Path, date_str: str, run_id: str) -> list[str]:
     """
-    Clean each (platform, country) bucket's newly-scraped/enriched rows and
-    upload each as its own NEW file inside the 'latest' folder — one file per
-    platform/country combination (e.g. app_data_android_ind_<date>.csv),
-    since bundle_id + country_code together are the table's grain and must
-    not be collapsed into one row. Existing files under latest_prefix are
-    never read, merged, or overwritten — this only adds files.
+    Clean each bucket's newly-scraped/enriched rows, combine them all into a 
+    single DataFrame, and upload it as a NEW file inside the 'latest' folder.
+    Existing files under latest_prefix are never read, merged, or overwritten.
     """
     log.info(SEPARATOR)
-    log.info("STEP 4 — Clean and publish 4 new files in 'latest' (append-only)")
+    log.info("STEP 4 — Clean and publish combined file in 'latest' (append-only)")
     log.info(SEPARATOR)
 
-    published_uris = []
+    dfs = []
     for (platform, country), enriched_csv in enriched_paths.items():
         new_df = pd.read_csv(enriched_csv, low_memory=False)
         new_df = clean_dataframe(new_df)
-        log.info("Cleaned rows ready to publish for %s/%s: %d", platform, country, len(new_df))
+        log.info("Cleaned rows ready for %s/%s: %d", platform, country, len(new_df))
+        dfs.append(new_df)
 
-        filename = f"app_data_{platform}_{country.lower()}_{date_str}_{run_id}.csv"
-        local_out = workdir / filename
-        new_df.to_csv(local_out, index=False)
+    if not dfs:
+        return []
 
-        bucket = cfg["s3"]["bucket"]
-        key = f"{cfg['s3']['latest_prefix'].rstrip('/')}/{filename}"
-        published_uris.append(upload_file(s3, local_out, bucket, key))
+    combined_df = pd.concat(dfs, ignore_index=True)
+    log.info("Total combined rows ready to publish: %d", len(combined_df))
 
-    return published_uris
+    filename_pattern = cfg.get("output", {}).get("latest_filename_pattern", "app_data_{date}.csv")
+    filename = filename_pattern.format(date=f"{date_str}_{run_id}")
+    
+    local_out = workdir / filename
+    combined_df.to_csv(local_out, index=False)
+
+    bucket = cfg["s3"]["bucket"]
+    key = f"{cfg['s3']['latest_prefix'].rstrip('/')}/{filename}"
+    published_uri = upload_file(s3, local_out, bucket, key)
+
+    return [published_uri]
 
 
 # ---------------------------------------------------------------------------

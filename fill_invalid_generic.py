@@ -13,7 +13,7 @@ Static defaults:
     free             → "false"
     offers_iap       → "false"
 
-Statistical defaults (queried live from Athena prod.app_features):
+Statistical defaults (queried live from Athena shreyansh.app_features):
     score            → MODE
     ratings_count    → MODE
     installs         → MEDIAN for Android rows; always 0 for iOS rows
@@ -96,14 +96,15 @@ ATHENA_S3_STAGING_DIR = "s3://mobavenue-simplismart-aws-s3-apse-sg/rtb/data/shab
 
 ATHENA_STATS_QUERY = """
 WITH installs_median AS (
-    SELECT UPPER(os_type) as os, UPPER(country_code) as cc, APPROX_PERCENTILE(installs, 0.5) as installs_median
-    FROM prod.app_features
+    SELECT UPPER(os_type) as os, UPPER(country_code) as cc, ROUND(APPROX_PERCENTILE(installs, 0.5)) as installs_median
+    FROM shreyansh.app_features
+    WHERE "default" = false
     GROUP BY 1, 2
 ),
 score_counts AS (
     SELECT UPPER(os_type) as os, UPPER(country_code) as cc, score, COUNT(*) as cnt
-    FROM prod.app_features
-    WHERE score IS NOT NULL
+    FROM shreyansh.app_features
+    WHERE score IS NOT NULL AND "default" = false
     GROUP BY 1, 2, 3
 ),
 score_mode AS (
@@ -113,8 +114,8 @@ score_mode AS (
 ),
 ratings_counts AS (
     SELECT UPPER(os_type) as os, UPPER(country_code) as cc, ratings_count, COUNT(*) as cnt
-    FROM prod.app_features
-    WHERE ratings_count IS NOT NULL
+    FROM shreyansh.app_features
+    WHERE ratings_count IS NOT NULL AND "default" = false
     GROUP BY 1, 2, 3
 ),
 ratings_mode AS (
@@ -136,7 +137,7 @@ FULL OUTER JOIN ratings_mode r ON COALESCE(i.os, s.os) = r.os AND COALESCE(i.cc,
 
 def _fetch_athena_stats() -> dict[tuple[str, str], dict[str, float]]:
     """
-    Query prod.app_features via Athena for the MODE of score/ratings_count
+    Query shreyansh.app_features via Athena for the MODE of score/ratings_count
     and the MEDIAN of installs, grouped by os_type and country_code.
 
     Credentials are resolved via the standard AWS credential chain.

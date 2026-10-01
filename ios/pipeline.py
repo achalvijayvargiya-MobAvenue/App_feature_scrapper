@@ -166,7 +166,11 @@ def run_batch_ios(input_csv: str, output_path: str, id_col: str = "bundle_id",
             except Exception as e:
                 fail_count += 1
                 tqdm.write(f"Failed to scrape {app_id_str}: {e}")
-            bar.set_postfix(ok=len(records), failed=fail_count)
+                
+                cc = df_in.loc[df_in[id_col] == app_id, "country_code"].iloc[0]
+                records.append({"bundle_id": app_id_str, "country_code": cc})
+                
+            bar.set_postfix(ok=len(records) - fail_count, failed=fail_count)
             bar.update(1)
 
     if not records:

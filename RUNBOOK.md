@@ -115,17 +115,31 @@ python analyze_invalid.py --input invalid_records.csv
 
 ---
 
-## 5. run_pipeline.py — daily S3/Athena automation
+## 5. run_pipeline.py — End-to-End Pipeline
 
-Requires the `pipeline/` package (`s3_utils.py`, `athena_utils.py`,
-`clean_output.py`) which is **not present in this checkout** — this script
-will fail to import until that package exists alongside it. Treat it as a
-reference for the intended production flow (Athena EXCEPT query → S3 →
-scrape/validate/enrich → clean/publish) rather than something runnable here.
+This is the primary orchestrator script that completely automates discovering new bundles from Athena, scraping them, validating/enriching them, and uploading the final datasets to S3.
 
-```
+**Basic Usage:**
+```powershell
 python run_pipeline.py --config config.yaml
-python run_pipeline.py --config config.yaml --date 20260714
+```
+
+**Available Parameters:**
+- `--config` (Path): Path to your configuration file. Defaults to `config.yaml`.
+- `--date` (String): Override today's date for folder naming. Format: `YYYYMMDD`. (Defaults to today).
+- `--platform` (String): Restricts scraping to a specific platform. This is highly recommended to run in two separate terminals (one for Android, one for iOS) to safely speed up execution without jumbling logs!
+  - `all` (Default)
+  - `android`
+  - `ios`
+
+**Concurrent Execution Setup (Recommended):**
+Open two separate terminals and run these side-by-side:
+```powershell
+# Terminal 1:
+python run_pipeline.py --config config.yaml --platform android
+
+# Terminal 2:
+python run_pipeline.py --config config.yaml --platform ios
 ```
 
 ### Countries and grain

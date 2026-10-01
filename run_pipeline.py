@@ -156,7 +156,7 @@ def _segregate_bundles(extracted_csv: Path, workdir: Path, countries: list[str],
     Returns {(platform, country_code): path}, e.g.
     {("android", "IND"): ..., ("android", "USA"): ..., ("ios", "IND"): ..., ("ios", "USA"): ...}
     """
-    df = pd.read_csv(extracted_csv, low_memory=False)
+    df = pd.read_csv(extracted_csv, low_memory=False, dtype={id_col: str})
     df.columns = [c.lower() for c in df.columns]
     df["country_code"] = df["country_code"].astype(str).str.upper()
 
@@ -164,7 +164,8 @@ def _segregate_bundles(extracted_csv: Path, workdir: Path, countries: list[str],
     # by dropna()) don't shrink the boolean mask relative to df — those rows
     # are treated as "not iOS" (they fall into Android, same as any other
     # unresolvable bundle_id, rather than crashing df.loc[mask]).
-    ids = df[id_col].dropna().astype(str).str.strip()
+    # Also strip any accidental trailing `.0` in case pandas still saw it as a float
+    ids = df[id_col].dropna().astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
     is_ios = ids.str.isdigit().reindex(df.index, fill_value=False)
 
     paths: dict[tuple[str, str], Path] = {}
@@ -196,11 +197,11 @@ def _cap_bundles(csv_path: Path, limit: int | None, label: str) -> Path:
 # ---------------------------------------------------------------------------
 # Step 3
 # ---------------------------------------------------------------------------
-def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str, run_id: str) -> dict[tuple[str, str], Path]:
+def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, date_str: str, run_id: str, platform_filter: str = "all") -> tuple[dict[tuple[str, str], Path], dict[tuple[str, str], Path]]:
     """
     Scrape / validate / enrich each (platform, country) bucket independently
     and upload its enriched CSV + invalid-records CSV to the dated run
-    folder. Returns {(platform, country): enriched_csv_path}.
+    folder. Returns (enriched_paths, invalid_paths).
     """
     log.info(SEPARATOR)
     log.info("STEP 3 — Scrape / validate / enrich (Android + iOS) x (IND + USA)")
@@ -219,8 +220,13 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
 
     runners = {"android": run_batch_android, "ios": run_batch_ios}
     enriched_paths: dict[tuple[str, str], Path] = {}
+    invalid_paths: dict[tuple[str, str], Path] = {}
 
     for (platform, country), input_path in segregated.items():
+        if platform_filter != "all" and platform != platform_filter:
+            log.info("Skipping %s %s (restricted by --platform %s)", platform, country, platform_filter)
+            continue
+            
         country_param = COUNTRY_CODE_TO_PARAM.get(country, country.lower())
         label = f"{platform}_{country.lower()}"
         output_csv = workdir / f"{label}_output.csv"
@@ -241,6 +247,7 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
             key = f"{cfg['s3']['base_prefix'].rstrip('/')}/{date_str}/{run_id}/{invalid_csv.name}"
             upload_file(s3, invalid_csv, bucket, key)
             log.info("Unscrapable / invalid bundles archived to s3://%s/%s", bucket, key)
+            invalid_paths[(platform, country)] = invalid_csv
 
         if output_csv.exists():
             bucket = cfg["s3"]["bucket"]
@@ -250,7 +257,7 @@ def step3_scrape_enrich(cfg: dict, s3, extracted_local: Path, workdir: Path, dat
         else:
             log.warning("No output produced for %s/%s — nothing to publish for this bucket.", platform, country)
 
-    return enriched_paths
+    return enriched_paths, invalid_paths
 
 
 def _clean_csv_in_place(csv_path: Path) -> None:
@@ -265,7 +272,7 @@ def _clean_csv_in_place(csv_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Step 4
 # ---------------------------------------------------------------------------
-def step4_clean_and_publish(cfg: dict, s3, enriched_paths: dict[tuple[str, str], Path],
+def step4_clean_and_publish(cfg: dict, s3, enriched_paths: dict[tuple[str, str], Path], invalid_paths: dict[tuple[str, str], Path],
                              workdir: Path, date_str: str, run_id: str) -> list[str]:
     """
     Clean each bucket's newly-scraped/enriched rows, combine them all into a 
@@ -283,23 +290,46 @@ def step4_clean_and_publish(cfg: dict, s3, enriched_paths: dict[tuple[str, str],
         log.info("Cleaned rows ready for %s/%s: %d", platform, country, len(new_df))
         dfs.append(new_df)
 
-    if not dfs:
-        return []
+    final_uris = []
+    if dfs:
+        combined_df = pd.concat(dfs, ignore_index=True)
+        log.info("Total combined rows ready to publish: %d", len(combined_df))
 
-    combined_df = pd.concat(dfs, ignore_index=True)
-    log.info("Total combined rows ready to publish: %d", len(combined_df))
+        filename_pattern = cfg.get("output", {}).get("latest_filename_pattern", "app_data_{date}.csv")
+        filename = filename_pattern.format(date=f"{date_str}_{run_id}")
+        
+        local_out = workdir / filename
+        combined_df.to_csv(local_out, index=False)
 
-    filename_pattern = cfg.get("output", {}).get("latest_filename_pattern", "app_data_{date}.csv")
-    filename = filename_pattern.format(date=f"{date_str}_{run_id}")
-    
-    local_out = workdir / filename
-    combined_df.to_csv(local_out, index=False)
+        bucket = cfg["s3"]["bucket"]
+        key = f"{cfg['s3']['latest_prefix'].rstrip('/')}/{filename}"
+        published_uri = upload_file(s3, local_out, bucket, key)
+        final_uris.append(published_uri)
 
-    bucket = cfg["s3"]["bucket"]
-    key = f"{cfg['s3']['latest_prefix'].rstrip('/')}/{filename}"
-    published_uri = upload_file(s3, local_out, bucket, key)
+    invalid_dfs = []
+    for (platform, country), invalid_csv in invalid_paths.items():
+        new_df = pd.read_csv(invalid_csv, low_memory=False)
+        invalid_dfs.append(new_df)
+        
+    if invalid_dfs:
+        combined_invalid_df = pd.concat(invalid_dfs, ignore_index=True)
+        # Keep only the essential columns for the Athena EXCEPT query
+        if "bundle_id" in combined_invalid_df.columns and "country_code" in combined_invalid_df.columns:
+            combined_invalid_df = combined_invalid_df[["bundle_id", "country_code"]]
+        
+        log.info("Total combined invalid rows ready to publish: %d", len(combined_invalid_df))
+        
+        invalid_filename = f"invalid_data_{date_str}_{run_id}.csv"
+        local_invalid_out = workdir / invalid_filename
+        combined_invalid_df.to_csv(local_invalid_out, index=False)
+        
+        invalid_prefix = cfg["s3"].get("invalid_prefix", cfg["s3"]["base_prefix"].rstrip('/') + "/invalid")
+        bucket = cfg["s3"]["bucket"]
+        invalid_key = f"{invalid_prefix.rstrip('/')}/{invalid_filename}"
+        published_invalid_uri = upload_file(s3, local_invalid_out, bucket, invalid_key)
+        final_uris.append(published_invalid_uri)
 
-    return [published_uri]
+    return final_uris
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +340,8 @@ def main():
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--date", type=str, default=None,
                          help="Override today's date, format YYYYMMDD (default: actual today).")
+    parser.add_argument("--platform", type=str, choices=["all", "android", "ios"], default="all",
+                         help="Restrict scraping to a specific platform (default: all).")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -338,11 +370,11 @@ def main():
             bundles_df = bundles_df.head(limit)
 
         extracted_local = step2_save_extracted(cfg, s3, bundles_df, workdir, date_str, run_id)
-        enriched_paths = step3_scrape_enrich(cfg, s3, extracted_local, workdir, date_str, run_id)
-        if not enriched_paths:
+        enriched_paths, invalid_paths = step3_scrape_enrich(cfg, s3, extracted_local, workdir, date_str, run_id, platform_filter=args.platform)
+        if not enriched_paths and not invalid_paths:
             log.info("No buckets produced output — nothing to publish. Exiting.")
             return
-        final_uris = step4_clean_and_publish(cfg, s3, enriched_paths, workdir, date_str, run_id)
+        final_uris = step4_clean_and_publish(cfg, s3, enriched_paths, invalid_paths, workdir, date_str, run_id)
 
     log.info(SEPARATOR)
     log.info("DONE. Published:")

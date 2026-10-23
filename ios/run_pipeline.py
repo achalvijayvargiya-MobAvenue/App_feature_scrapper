@@ -5,6 +5,11 @@ Entry point for running the iOS enrichment pipeline on a batch of apps.
 """
 
 import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from ios.pipeline import run_batch_ios
 
 def _parse_args():

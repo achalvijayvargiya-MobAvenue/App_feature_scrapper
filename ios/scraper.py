@@ -26,10 +26,14 @@ def _fetch_itunes_data(app_id: str, country: str = "in", retries: int = 3) -> Di
     """
     Fetch data from iTunes API with simple retry logic.
     """
-    if app_id.isdigit():
-        url = f"https://itunes.apple.com/lookup?id={app_id}&country={country}"
+    target_id = app_id.strip()
+    if target_id.lower().startswith("id") and target_id[2:].isdigit():
+        target_id = target_id[2:]
+
+    if target_id.isdigit():
+        url = f"https://itunes.apple.com/lookup?id={target_id}&country={country}"
     else:
-        url = f"https://itunes.apple.com/lookup?bundleId={app_id}&country={country}"
+        url = f"https://itunes.apple.com/lookup?bundleId={target_id}&country={country}"
         
     for attempt in range(1, retries + 1):
         try:

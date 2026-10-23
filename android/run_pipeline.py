@@ -5,6 +5,11 @@ Entry point for running the Android enrichment pipeline on a batch of apps.
 """
 
 import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from android.pipeline import run_batch_android
 
 def _parse_args():

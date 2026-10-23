@@ -1,177 +1,142 @@
-# RUNBOOK — App_feature_scrapper
+# RUNBOOK — App Feature Scraper & Enrichment Pipeline
 
-How to run each script in this project.
+A simple, practical guide on how to configure and run the scraping and enrichment workflows.
 
-## Setup (once per shell session)
+---
 
-Activate the venv (adjust path if yours differs):
+## 1. Setup & Environment (Once per terminal session)
+
+Activate the Python virtual environment:
 
 ```powershell
-# PowerShell — if script execution is blocked, use this instead of Activate.ps1:
-powershell -ExecutionPolicy Bypass -File C:\App_features\venv\Scripts\Activate.ps1
+# PowerShell:
+C:\App_features\venv\Scripts\Activate.ps1
 
-# or call the venv's python directly without activating:
-C:\App_features\venv\Scripts\python.exe <script>.py ...
+# If script execution is blocked on Windows:
+powershell -ExecutionPolicy Bypass -File C:\App_features\venv\Scripts\Activate.ps1
 ```
 
 ```bash
-# Git Bash
+# Git Bash:
 source "c:/App_features/venv/Scripts/activate"
 ```
 
-Any time `orchestrate.py` runs, it fills missing `score` / `ratings_count` /
-`installs` with MODE/MEDIAN values queried live from Athena
-(`prod.app_features`). AWS credentials and region are picked up
-automatically from your AWS CLI config (`~/.aws/credentials` / SSO / IAM
-role) — nothing to set if `aws sts get-caller-identity` already works in
-this shell. The Athena query-results staging bucket is hardcoded as
-`ATHENA_S3_STAGING_DIR` in `fill_invalid_generic.py` — update it there
-directly if it ever needs to change.
+> [!NOTE]
+> **AWS Credentials**: Ensure your AWS CLI credentials (`~/.aws/credentials`) are configured for region `ap-southeast-1`. The Athena queries and S3 uploads will automatically use your active credential chain.
 
 ---
 
-## 1. orchestrate.py — main pipeline
+## 2. Automated End-to-End Pipeline (`run_pipeline.py`)
 
-Validates and enriches a CSV of bundle data, producing a valid+enriched
-output and an invalid-records output.
+This is the primary automated script. It discovers new app bundles from Athena `rtb_bids`, scrapes metadata from Google Play / Apple App Store, validates & enriches the features, and uploads the results directly to S3.
 
-Pipeline: **load → (scrape missing fields) → resolve installs → fill
-defaults → validate → enrich → save**.
+### Workflow:
+1. **Step 1 (Athena Discovery)**: Runs an `EXCEPT` query against `mobavenue_dsp.rtb_bids` to find bundle IDs not yet present in `prod.app_features` or `prod.app_features_invalid`.
+2. **Step 2 (Archive Extracted)**: Saves the raw discovered bundle list to S3.
+3. **Step 3 (Scrape & Enrich)**: Segregates bundles by platform (numeric IDs $\rightarrow$ iOS, package names $\rightarrow$ Android) and scrapes them against the country storefront (`IND` $\rightarrow$ `in`, `USA` $\rightarrow$ `us`).
+4. **Step 4 (Publish to S3)**: Cleans and uploads:
+   - Valid enriched records to S3 `latest/` prefix: `app_data_<YYYYMMDD>_<HHMMSS>.csv`
+   - Unscrapable / invalid bundles to S3 `invalid/` prefix: `invalid_data_<YYYYMMDD>_<HHMMSS>.csv`
 
-### First-time run (input needs scraping)
+### Configuration (`config.yaml`):
+Before running, check or update `config.yaml`:
+```yaml
+query:
+  year: 2026
+  month: 10
+  days: [10, 11, 12, 13]      # Day partition(s) in rtb_bids to scan
+  countries: [IND, USA]        # Target country storefronts
 
-Use this when `--input` is a fresh list of bundle_ids or partially-scraped
-data, and you want Google Play hit for anything missing.
-
-```
-python orchestrate.py --input scraped_data.csv --output valid_enriched_records.csv --invalid-output invalid_records.csv
-```
-
-All three flags have defaults (`scraped_data.csv` /
-`valid_enriched_records.csv` / `invalid_records.csv`), so a bare
-`python orchestrate.py` also works if your file is named `scraped_data.csv`.
-
-### Reprocessing an already-scraped invalid CSV (no re-scraping)
-
-Use this when `--input` is a previous run's `invalid_records.csv` — the data
-was already scraped once, and you just want default-filling + validation +
-enrichment applied, without hitting Google Play again.
-
-```
-python orchestrate.py --input invalid_records.csv --output recovered_valid.csv --invalid-output still_invalid.csv --skip-scrape
+scraping:
+  allow_defaults: false        # Set true to fill defaults from Athena stats; false to drop missing apps
+  max_bundles_per_run: 100000  # Cap on bundles discovered per run
+  max_bundles_per_platform: 100000
 ```
 
-`--skip-scrape` is a bare flag — just including it turns it on, there's no
-value to pass (not `--skip-scrape true`, just `--skip-scrape`). Omit it
-entirely to scrape.
+### Execution Commands:
 
----
+#### Recommended: Run Concurrently in Two Terminals
+Running Android and iOS side-by-side in separate terminals prevents log mixing and speeds up execution:
 
-## 2. run_single_bundle.py — one bundle at a time
-
-```
-python run_single_bundle.py com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge
-```
-
-Optional flags:
-
-```
-python run_single_bundle.py <bundle_id> --from-csv existing_data.csv --output result.csv
-```
-
-- `--from-csv` — look up the bundle in this CSV first; scrapes only if not found there.
-- `--output` — output CSV path (default: `single_bundle_output.csv`).
-
-This internally calls `orchestrate.run()`, so it also needs the Athena env
-vars set (see Setup above).
-
----
-
-## 3. fill_invalid_generic.py — standalone default-filler
-
-Same defaulting logic `orchestrate.py` now runs automatically, exposed as
-its own script if you want to fill a CSV without running the full
-validate+enrich pipeline.
-
-```
-python fill_invalid_generic.py --input invalid_records.csv --output generic_filled_records.csv
-```
-
-Note: output from this script alone is **not** in the final enriched
-schema (no category/score/install/age/pricing/rating columns) — for a
-main-table-ready output, use `orchestrate.py --skip-scrape` instead (see
-above), which fills defaults *and* runs the enrichers.
-
----
-
-## 4. analyze_invalid.py — diagnose invalid_records.csv
-
-Reports how many bundles were dropped due to exactly 1 missing field, 2
-missing fields, etc., and which columns are the culprits in each bucket.
-
-```
-python analyze_invalid.py --input invalid_records.csv
-```
-
----
-
-## 5. run_pipeline.py — End-to-End Pipeline
-
-This is the primary orchestrator script that completely automates discovering new bundles from Athena, scraping them, validating/enriching them, and uploading the final datasets to S3.
-
-**Basic Usage:**
 ```powershell
-python run_pipeline.py --config config.yaml
-```
-
-**Available Parameters:**
-- `--config` (Path): Path to your configuration file. Defaults to `config.yaml`.
-- `--date` (String): Override today's date for folder naming. Format: `YYYYMMDD`. (Defaults to today).
-- `--platform` (String): Restricts scraping to a specific platform. This is highly recommended to run in two separate terminals (one for Android, one for iOS) to safely speed up execution without jumbling logs!
-  - `all` (Default)
-  - `android`
-  - `ios`
-
-**Concurrent Execution Setup (Recommended):**
-Open two separate terminals and run these side-by-side:
-```powershell
-# Terminal 1:
+# Terminal 1 — Android:
 python run_pipeline.py --config config.yaml --platform android
 
-# Terminal 2:
+# Terminal 2 — iOS:
 python run_pipeline.py --config config.yaml --platform ios
 ```
 
-### Countries and grain
-
-`prod.app_features`'s grain is **(bundle_id, country_code)** — the same app
-can legitimately have different `score`, `content_rating`, `ratings_count`,
-and `launch_date` per country's storefront, so rows for different countries
-are never merged or deduped into one.
-
-Countries scraped per run are set in `config.yaml`'s `query.countries` (e.g.
-`[IND, USA]`). The EXCEPT query compares on `(bundle_id, country_code)`
-against `prod.app_features`, so an app already present for IND but missing
-for USA still gets pulled and scraped for USA.
-
-### Output: 4 files per run
-
-Step 3 splits the EXCEPT query's results into 4 buckets — Android/iOS ×
-each configured country — and scrapes each bucket against the matching
-storefront (`google_play_scraper`/iTunes `country` param: `IND → in`,
-`USA → us`), so per-country fields are pulled from the correct store rather
-than reused across countries.
-
-Step 4 publishes each bucket as its own new file into the `latest/` S3
-folder (nothing existing there is read, merged, or overwritten):
-
-```
-app_data_android_ind_<YYYYMMDD>_<HHMMSS>.csv
-app_data_android_usa_<YYYYMMDD>_<HHMMSS>.csv
-app_data_ios_ind_<YYYYMMDD>_<HHMMSS>.csv
-app_data_ios_usa_<YYYYMMDD>_<HHMMSS>.csv
+#### Run All Platforms in One Terminal:
+```powershell
+python run_pipeline.py --config config.yaml --platform all
 ```
 
-`combine.py` (merging Android + iOS into one CSV) is **not** part of this
-flow anymore — merging would collapse the country dimension out of the
-grain.
+#### Optional Flags:
+- `--config <path>`: Path to YAML config (default: `config.yaml`).
+- `--platform <all|android|ios>`: Restrict run to a specific OS.
+- `--date <YYYYMMDD>`: Override today's date for folder naming.
+
+---
+
+## 3. Scraping a Single App (Testing & Ad-hoc Runs)
+
+Use these scripts when you want to scrape and enrich a specific app without running the whole Athena pipeline.
+
+### Android:
+```powershell
+# Default country is India ('in'):
+python android/run_single_bundle.py com.whatsapp
+
+# Specific country (e.g., USA 'us'):
+python android/run_single_bundle.py com.getcopper.copper --country us --output copper_android.csv
+```
+
+### iOS:
+Accepts either numeric Apple App Store IDs (e.g. `1486647561` or `id1486647561`) or bundle IDs:
+```powershell
+# Default country is India ('in'):
+python ios/run_single_bundle.py 310633997
+
+# Specific country (e.g., USA 'us'):
+python ios/run_single_bundle.py 1486647561 --country us --output copper_ios.csv
+```
+
+> [!TIP]
+> Single bundle runs save the output CSV locally (`--output`). If you want to push the file to S3:
+> ```powershell
+> aws s3 cp .\copper_android.csv s3://mobavenue-simplismart-aws-s3-apse-sg/rtb/data/ml/app_features/latest/
+> ```
+
+---
+
+## 4. Batch CSV Scraping (Offline / Custom List)
+
+If you already have a CSV containing app IDs and want to run the full scrape + enrichment flow without Athena:
+
+### Android Batch:
+```powershell
+python android/run_pipeline.py my_android_apps.csv --id-col bundle_id --output enriched_android.csv
+```
+
+### iOS Batch:
+```powershell
+python ios/run_pipeline.py my_ios_apps.csv --id-col bundle_id --output enriched_ios.csv
+```
+
+---
+
+## 5. Standalone Utilities
+
+### `fill_invalid_generic.py` (Default Filling)
+Queries live statistics (`score` mode, `ratings_count` mode, `installs` median) from `prod.app_features` in Athena and fills missing fields in any incomplete CSV:
+```powershell
+python fill_invalid_generic.py --input invalid_records.csv --output generic_filled_records.csv
+```
+
+### `merge.py` (S3 Daily Rollup)
+Located at project root (`c:\App_features\merge.py`). If multiple pipeline runs occurred on the same day, this combines all timestamped `app_data_<YYYYMMDD>_<HHMMSS>.csv` files into a single consolidated `app_data_merged_<YYYYMMDD>.csv`:
+```powershell
+# In c:\App_features:
+python merge.py
+```
+*(Make sure `INPUT_PREFIX` and `OUTPUT_PREFIX` in `merge.py` point to your desired S3 directory, e.g. `rtb/data/ml/app_features/...`).*

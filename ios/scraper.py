@@ -20,14 +20,20 @@ class NotFoundError(Exception):
 class ScraperError(Exception):
     pass
 
+COUNTRY_TO_CODE = {"in": "IND", "us": "USA"}
+
 def _fetch_itunes_data(app_id: str, country: str = "in", retries: int = 3) -> Dict[str, Any]:
     """
     Fetch data from iTunes API with simple retry logic.
     """
-    if app_id.isdigit():
-        url = f"https://itunes.apple.com/lookup?id={app_id}&country={country}"
+    target_id = app_id.strip()
+    if target_id.lower().startswith("id") and target_id[2:].isdigit():
+        target_id = target_id[2:]
+
+    if target_id.isdigit():
+        url = f"https://itunes.apple.com/lookup?id={target_id}&country={country}"
     else:
-        url = f"https://itunes.apple.com/lookup?bundleId={app_id}&country={country}"
+        url = f"https://itunes.apple.com/lookup?bundleId={target_id}&country={country}"
         
     for attempt in range(1, retries + 1):
         try:
@@ -98,7 +104,7 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
         # iTunes API has no subtitle/summary field on this endpoint. "Not Available" is
         # used instead of "NA"/"N/A" because pandas treats those as null on CSV re-read.
         "summary": "Not Available",
-        "genreid": app_info.get("primaryGenreName"),
+        "genreid": "_".join(sorted(set(app_info.get("genres", [])))) if app_info.get("genres") else app_info.get("primaryGenreName"),
         "content_rating": app_info.get("trackContentRating") or app_info.get("contentAdvisoryRating"),
         "score": app_info.get("averageUserRating"),
         "ratings_count": app_info.get("userRatingCount"),
@@ -109,7 +115,7 @@ def scrape_ios_bundle(app_id: str, country: str = "in") -> Dict[str, Any]:
         "offers_iap": offers_iap,
         "launch_date": _normalize_launch_date(app_info.get("releaseDate")),
         "real_installs": None,
-        "country_code": "IND",
+        "country_code": COUNTRY_TO_CODE.get(country.lower(), country.upper()),
         "os_type": "IOS",
         "default": None
     }

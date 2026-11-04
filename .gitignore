@@ -8,8 +8,9 @@
 #
 
 .DS_Store
-README.md
 __pycache__/
+
+# README.md and RUNBOOK.md are tracked project documentation.
 
 !.gitignore
 !requirements.txt
